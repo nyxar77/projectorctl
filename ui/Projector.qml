@@ -282,8 +282,13 @@ Scope {
 		onTriggered: root.closePanel()
 	}
 
-	FloatingWindow {
+	Variants {
+		model: Quickshell.screens
+
+		FloatingWindow {
 			id: panelWindow
+			property var modelData
+			screen: modelData
 
 			visible: root.panelVisible
 			title: "Projector"
@@ -584,6 +589,7 @@ Scope {
 					}
 				}
 			}
+		}
 	}
 
 	component OutputTile: Rectangle {
