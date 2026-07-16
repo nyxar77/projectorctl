@@ -157,6 +157,24 @@ layout="$(<"$layout_log")"
 assert_contains "$layout" 'output = "eDP-1", mode = "preferred", position = "0x0"' "laptop-only keeps its enable rule in the final layout"
 assert_not_contains "$layout" 'output = "HEADLESS-1"' "laptop-only leaves headless outputs alone"
 
+hypr_root="$test_root/hypr"
+mkdir -p "$hypr_root/older" "$hypr_root/newer"
+printf '10 wayland-2\n' > "$hypr_root/older/hyprland.lock"
+printf '11 wayland-1\n' > "$hypr_root/newer/hyprland.lock"
+touch -t 202601010101 "$hypr_root/older/hyprland.lock"
+touch -t 202602020202 "$hypr_root/newer/hyprland.lock"
+instance_is_live() { [[ -n "$1" ]]; }
+use_instance() { CHOSEN_INSTANCE="$1"; }
+export HYPRLAND_INSTANCE_SIGNATURE=""
+export WAYLAND_DISPLAY=wayland-2
+CHOSEN_INSTANCE=""
+resolve_instance
+assert_eq older "$CHOSEN_INSTANCE" "follows WAYLAND_DISPLAY when the signature is stale"
+export WAYLAND_DISPLAY=wayland-missing
+CHOSEN_INSTANCE=""
+resolve_instance
+assert_eq newer "$CHOSEN_INSTANCE" "falls back to the newest live Hyprland instance"
+
 if main apply >/dev/null 2>&1; then
 	fail "apply without a mode should fail"
 else

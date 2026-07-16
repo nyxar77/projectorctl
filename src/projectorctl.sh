@@ -50,8 +50,13 @@ use_instance() {
 
 resolve_instance() {
 	local current="${HYPRLAND_INSTANCE_SIGNATURE:-}"
+	local wanted_display="${WAYLAND_DISPLAY:-}"
 	local instance_dir=""
 	local signature=""
+	local display=""
+	local candidate=""
+	local candidate_mtime=-1
+	local lock_mtime=0
 	local -a instance_dirs=()
 
 	if instance_is_live "$current"; then
@@ -65,13 +70,21 @@ resolve_instance() {
 
 	for instance_dir in "${instance_dirs[@]}"; do
 		signature="${instance_dir##*/}"
-		if instance_is_live "$signature"; then
+		instance_is_live "$signature" || continue
+		read -r _ display < "$instance_dir/hyprland.lock" || display=""
+		if [[ -n "$wanted_display" && "$display" == "$wanted_display" ]]; then
 			use_instance "$signature"
 			return 0
 		fi
+		lock_mtime="$(stat -c %Y "$instance_dir/hyprland.lock" 2>/dev/null || printf '0')"
+		if ((lock_mtime > candidate_mtime)); then
+			candidate="$signature"
+			candidate_mtime="$lock_mtime"
+		fi
 	done
 
-	return 1
+	[[ -n "$candidate" ]] || return 1
+	use_instance "$candidate"
 }
 
 monitor_json() {
