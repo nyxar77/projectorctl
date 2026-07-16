@@ -18,7 +18,7 @@ programs.projectorctl = {
 };
 ```
 
-Bind `projector-panel` to a key in Hyprland, or use the CLI directly. The panel opens on the focused display; press the same key again to close it.
+Bind `projector-panel` to a key in Hyprland, or use the CLI directly. The panel appears above every active display without belonging to a workspace; press the same key again to close it everywhere.
 
 ```sh
 projectorctl status

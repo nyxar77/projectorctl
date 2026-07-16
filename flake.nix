@@ -38,6 +38,8 @@
             pkgs.bash
             pkgs.coreutils
             pkgs.jq
+            pkgs.qt6.qtdeclarative
+            pkgs.qt6.qtwayland
             pkgs.shellcheck
             pkgs.util-linux
           ];
@@ -52,6 +54,11 @@
           PROJECTORCTL_PANEL_SOURCE=${./src/projector-panel.sh} \
             PROJECTORCTL_FAKE_QUICKSHELL=${./tests/fake-quickshell} \
             bash ${./tests/panel.bash}
+          qmllint \
+            -I ${pkgs.qt6.qtdeclarative}/lib/qt-6/qml \
+            -I ${pkgs.qt6.qtwayland}/lib/qt-6/qml \
+            -I ${pkgs.quickshell}/lib/qt-6/qml \
+            ${./ui/Projector.qml}
           touch "$out"
         '';
       };

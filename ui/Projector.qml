@@ -5,8 +5,8 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import QtCore
 import Quickshell
-import Quickshell.Hyprland
 import Quickshell.Io
+import Quickshell.Wayland
 
 Scope {
 	id: root
@@ -46,15 +46,6 @@ Scope {
 		: health === "warning"
 			? warning
 			: health === "idle" ? dim : good
-	readonly property var focusedScreen: {
-		const monitor = Hyprland.focusedMonitor;
-		const wanted = monitor ? monitor.name : "";
-		for (let index = 0; index < Quickshell.screens.length; index++) {
-			if (Quickshell.screens[index].name === wanted)
-				return Quickshell.screens[index];
-		}
-		return Quickshell.screens.length > 0 ? Quickshell.screens[0] : null;
-	}
 
 	function colorValue(value, fallback) {
 		if (value === undefined || value === null)
@@ -345,213 +336,228 @@ Scope {
 		onTriggered: root.closePanel()
 	}
 
-	FloatingWindow {
-		id: panelWindow
-		screen: root.focusedScreen
-		visible: root.panelVisible && root.focusedScreen !== null
-		title: "projector"
-		implicitWidth: 460
-		implicitHeight: 566
-		minimumSize.width: 430
-		minimumSize.height: 540
-		maximumSize.width: 500
-		maximumSize.height: 620
-		color: "transparent"
+	Variants {
+		model: Quickshell.screens
 
-		Rectangle {
-			anchors.fill: parent
-			radius: 11
-			color: root.background
-			border.color: root.faded(root.line, 0.8)
-			border.width: 1
-			focus: true
-			Keys.onPressed: event => root.handleKey(event)
-			Component.onCompleted: forceActiveFocus()
+		PanelWindow {
+			id: panelWindow
+			property var modelData
 
-			ColumnLayout {
-				anchors.fill: parent
-				anchors.margins: 20
-				spacing: 0
+			screen: modelData
+			visible: root.panelVisible
+			color: "transparent"
+			exclusionMode: ExclusionMode.Ignore
+			exclusiveZone: 0
+			focusable: true
+			anchors {
+				left: true
+				right: true
+				top: true
+				bottom: true
+			}
+			WlrLayershell.layer: WlrLayer.Overlay
+			WlrLayershell.keyboardFocus: WlrKeyboardFocus.OnDemand
+			WlrLayershell.namespace: "projectorctl"
+			mask: Region { item: panelCard }
 
-				RowLayout {
-					Layout.fillWidth: true
-					Layout.preferredHeight: 48
-					spacing: 10
+			Rectangle {
+				id: panelCard
+				width: Math.max(1, Math.min(460, parent.width - 32))
+				height: Math.max(1, Math.min(566, parent.height - 32))
+				anchors.centerIn: parent
+				radius: 11
+				color: root.background
+				border.color: root.faded(root.line, 0.8)
+				border.width: 1
+				focus: true
+				Keys.onPressed: event => root.handleKey(event)
+				Component.onCompleted: forceActiveFocus()
 
-					ColumnLayout {
+				ColumnLayout {
+					anchors.fill: parent
+					anchors.margins: 20
+					spacing: 0
+
+					RowLayout {
 						Layout.fillWidth: true
-						spacing: 1
+						Layout.preferredHeight: 48
+						spacing: 10
+
+						ColumnLayout {
+							Layout.fillWidth: true
+							spacing: 1
+
+							Text {
+								text: "projector"
+								color: root.text
+								font.pixelSize: 21
+								font.weight: Font.DemiBold
+							}
+
+							Text {
+								Layout.fillWidth: true
+								text: root.externalOutput()
+									? root.externalOutput().name + " · " + root.externalOutput().description
+									: "no external display connected"
+								color: root.dim
+								font.pixelSize: 10
+								elide: Text.ElideRight
+							}
+						}
+
+						QuietButton {
+							glyph: "↻"
+							accessibleName: "Refresh status"
+							enabled: !root.actionBusy
+							onClicked: root.requestStatus()
+						}
+
+						QuietButton {
+							glyph: "×"
+							accessibleName: "Close"
+							onClicked: root.closePanel()
+						}
+					}
+
+					RowLayout {
+						Layout.fillWidth: true
+						Layout.preferredHeight: 34
+						spacing: 8
+
+						Rectangle {
+							implicitWidth: 8
+							implicitHeight: 8
+							radius: 4
+							color: root.healthColor
+						}
 
 						Text {
-							text: "projector"
+							text: root.currentModeLabel
 							color: root.text
-							font.pixelSize: 21
+							font.pixelSize: 12
 							font.weight: Font.DemiBold
 						}
 
 						Text {
+							text: "—"
+							color: root.line
+							font.pixelSize: 11
+						}
+
+						Text {
 							Layout.fillWidth: true
-							text: root.externalOutput()
-								? root.externalOutput().name + " · " + root.externalOutput().description
-								: "no external display connected"
+							text: root.statusBusy ? "checking…" : root.statusMessage
 							color: root.dim
 							font.pixelSize: 10
 							elide: Text.ElideRight
 						}
 					}
 
-					QuietButton {
-						glyph: "↻"
-						accessibleName: "Refresh status"
-						enabled: !root.actionBusy
-						onClicked: root.requestStatus()
-					}
-
-					QuietButton {
-						glyph: "×"
-						accessibleName: "Close"
-						onClicked: root.closePanel()
-					}
-				}
-
-				RowLayout {
-					Layout.fillWidth: true
-					Layout.preferredHeight: 34
-					spacing: 8
-
-					Rectangle {
-						implicitWidth: 8
-						implicitHeight: 8
-						radius: 4
-						color: root.healthColor
+					DisplayPair {
+						Layout.fillWidth: true
+						Layout.preferredHeight: 72
+						laptop: root.internalOutput()
+						projector: root.externalOutput()
 					}
 
 					Text {
-						text: root.currentModeLabel
+						Layout.topMargin: 16
+						Layout.bottomMargin: 8
+						text: "Where should this desktop go?"
 						color: root.text
 						font.pixelSize: 12
 						font.weight: Font.DemiBold
 					}
 
-					Text {
-						text: "—"
-						color: root.line
-						font.pixelSize: 11
-					}
-
-					Text {
+					Rectangle {
 						Layout.fillWidth: true
-						text: root.statusBusy ? "checking…" : root.statusMessage
-						color: root.dim
-						font.pixelSize: 10
-						elide: Text.ElideRight
-					}
-				}
+						Layout.preferredHeight: 286
+						radius: 8
+						color: root.surface
+						border.color: root.line
+						border.width: 1
 
-				DisplayPair {
-					Layout.fillWidth: true
-					Layout.preferredHeight: 72
-					laptop: root.internalOutput()
-					projector: root.externalOutput()
-				}
+						ColumnLayout {
+							anchors.fill: parent
+							anchors.margins: 1
+							spacing: 0
 
-				Text {
-					Layout.topMargin: 16
-					Layout.bottomMargin: 8
-					text: "Where should this desktop go?"
-					color: root.text
-					font.pixelSize: 12
-					font.weight: Font.DemiBold
-				}
+							ModeRow {
+								Layout.fillWidth: true
+								Layout.fillHeight: true
+								actionId: "builtin"
+								shortcutText: "1"
+								titleText: "Laptop only"
+								detailText: "Turn every external display off"
+								externalRequired: false
+								onClicked: root.applyMode(actionId)
+							}
 
-				Rectangle {
-					Layout.fillWidth: true
-					Layout.preferredHeight: 286
-					radius: 8
-					color: root.surface
-					border.color: root.line
-					border.width: 1
+							Hairline { Layout.fillWidth: true }
 
-					ColumnLayout {
-						anchors.fill: parent
-						anchors.margins: 1
-						spacing: 0
+							ModeRow {
+								Layout.fillWidth: true
+								Layout.fillHeight: true
+								actionId: "duplicate"
+								shortcutText: "2"
+								titleText: "Mirror"
+								detailText: "Show the same desktop on both"
+								onClicked: root.applyMode(actionId)
+							}
 
-						ModeRow {
-							Layout.fillWidth: true
-							Layout.fillHeight: true
-							actionId: "builtin"
-							shortcutText: "1"
-							titleText: "Laptop only"
-							detailText: "Turn every external display off"
-							externalRequired: false
-							onClicked: root.applyMode(actionId)
-						}
+							Hairline { Layout.fillWidth: true }
 
-						Hairline { Layout.fillWidth: true }
+							ModeRow {
+								Layout.fillWidth: true
+								Layout.fillHeight: true
+								actionId: "external"
+								shortcutText: "3"
+								titleText: "Projector only"
+								detailText: "Laptop wakes if the cable comes out"
+								onClicked: root.applyMode(actionId)
+							}
 
-						ModeRow {
-							Layout.fillWidth: true
-							Layout.fillHeight: true
-							actionId: "duplicate"
-							shortcutText: "2"
-							titleText: "Mirror"
-							detailText: "Show the same desktop on both"
-							onClicked: root.applyMode(actionId)
-						}
+							Hairline { Layout.fillWidth: true }
 
-						Hairline { Layout.fillWidth: true }
+							ModeRow {
+								Layout.fillWidth: true
+								Layout.fillHeight: true
+								actionId: "extend-right"
+								shortcutText: "4"
+								titleText: "Extend right"
+								detailText: "Put the projector to the right"
+								onClicked: root.applyMode(actionId)
+							}
 
-						ModeRow {
-							Layout.fillWidth: true
-							Layout.fillHeight: true
-							actionId: "external"
-							shortcutText: "3"
-							titleText: "Projector only"
-							detailText: "Laptop wakes if the cable comes out"
-							onClicked: root.applyMode(actionId)
-						}
+							Hairline { Layout.fillWidth: true }
 
-						Hairline { Layout.fillWidth: true }
-
-						ModeRow {
-							Layout.fillWidth: true
-							Layout.fillHeight: true
-							actionId: "extend-right"
-							shortcutText: "4"
-							titleText: "Extend right"
-							detailText: "Put the projector to the right"
-							onClicked: root.applyMode(actionId)
-						}
-
-						Hairline { Layout.fillWidth: true }
-
-						ModeRow {
-							Layout.fillWidth: true
-							Layout.fillHeight: true
-							actionId: "extend-left"
-							shortcutText: "5"
-							titleText: "Extend left"
-							detailText: "Put the projector to the left"
-							onClicked: root.applyMode(actionId)
+							ModeRow {
+								Layout.fillWidth: true
+								Layout.fillHeight: true
+								actionId: "extend-left"
+								shortcutText: "5"
+								titleText: "Extend left"
+								detailText: "Put the projector to the left"
+								onClicked: root.applyMode(actionId)
+							}
 						}
 					}
-				}
 
-				RowLayout {
-					Layout.fillWidth: true
-					Layout.fillHeight: true
-					Layout.minimumHeight: 34
-					spacing: 8
-
-					Text {
+					RowLayout {
 						Layout.fillWidth: true
-						text: root.errorAction.length > 0
-							? root.errorText + (root.errorRecovered ? " · laptop restored" : "")
-							: root.actionBusy ? "changing layout…" : "Esc closes · R checks again"
-						color: root.errorAction.length > 0 ? root.danger : root.dim
-						font.pixelSize: 10
-						elide: Text.ElideRight
+						Layout.fillHeight: true
+						Layout.minimumHeight: 34
+						spacing: 8
+
+						Text {
+							Layout.fillWidth: true
+							text: root.errorAction.length > 0
+								? root.errorText + (root.errorRecovered ? " · laptop restored" : "")
+								: root.actionBusy ? "changing layout…" : "Esc closes · R checks again"
+							color: root.errorAction.length > 0 ? root.danger : root.dim
+							font.pixelSize: 10
+							elide: Text.ElideRight
+						}
 					}
 				}
 			}
