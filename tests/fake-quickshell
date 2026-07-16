@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+trap 'exit 0' INT TERM
+while true; do
+	sleep 1
+done

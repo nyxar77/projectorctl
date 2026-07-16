@@ -2,7 +2,7 @@
 
 Safe display switching for Hyprland laptops and projectors.
 
-`projectorctl` provides laptop-only, external-only, native Duplicate, and extended layouts. It verifies every layout, uses Hyprland's native mirroring rather than a streamed virtual output, and runs a user service that restores the built-in display when an external-only display disconnects.
+`projectorctl` provides laptop-only, projector-only, native mirroring, and extended layouts. It verifies every layout, uses Hyprland's own mirroring instead of a streamed virtual output, and restores the laptop panel if a projector-only setup is unplugged.
 
 ## Home Manager
 
@@ -18,7 +18,7 @@ programs.projectorctl = {
 };
 ```
 
-Bind `projector-panel` to a key in Hyprland, or use the CLI directly:
+Bind `projector-panel` to a key in Hyprland, or use the CLI directly. The panel opens on the focused display; press the same key again to close it.
 
 ```sh
 projectorctl status

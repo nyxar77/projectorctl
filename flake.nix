@@ -27,25 +27,10 @@
 
         packages.panel = pkgs.writeShellApplication {
           name = "projector-panel";
-          runtimeInputs = [ pkgs.coreutils pkgs.quickshell ];
+          runtimeInputs = [ pkgs.coreutils pkgs.quickshell pkgs.util-linux ];
           text = ''
-            runtime_dir="''${XDG_RUNTIME_DIR:-/tmp}"
-            pid_file="$runtime_dir/projector-panel.pid"
-            mkdir -p "$runtime_dir"
-
-            if read -r old_pid < "$pid_file" 2>/dev/null && [ -n "$old_pid" ] && [ "$old_pid" != "$$" ]; then
-              if kill -0 "$old_pid" 2>/dev/null; then
-                old_command="$(tr '\0' ' ' < "/proc/$old_pid/cmdline" 2>/dev/null || true)"
-                if [[ "$old_command" == *quickshell*Projector.qml* ]]; then
-                  kill "$old_pid" 2>/dev/null || true
-                  exit 0
-                fi
-              fi
-            fi
-
-            printf "%s\n" "$$" > "$pid_file"
-            exec quickshell -p ${./ui/Projector.qml} "$@"
-          '';
+            PROJECTORCTL_PANEL_QML=${./ui/Projector.qml}
+          '' + builtins.readFile ./src/projector-panel.sh;
         };
 
         checks.controller = pkgs.runCommand "projectorctl-controller-check" {
@@ -54,10 +39,19 @@
             pkgs.coreutils
             pkgs.jq
             pkgs.shellcheck
+            pkgs.util-linux
           ];
         } ''
-          shellcheck -x ${./src/projectorctl.sh} ${./tests/controller.bash}
+          shellcheck -x \
+            ${./src/projectorctl.sh} \
+            ${./src/projector-panel.sh} \
+            ${./tests/controller.bash} \
+            ${./tests/panel.bash} \
+            ${./tests/fake-quickshell}
           PROJECTORCTL_SOURCE=${./src/projectorctl.sh} bash ${./tests/controller.bash}
+          PROJECTORCTL_PANEL_SOURCE=${./src/projector-panel.sh} \
+            PROJECTORCTL_FAKE_QUICKSHELL=${./tests/fake-quickshell} \
+            bash ${./tests/panel.bash}
           touch "$out"
         '';
       };

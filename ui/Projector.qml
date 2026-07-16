@@ -1,8 +1,11 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtCore
 import Quickshell
+import Quickshell.Hyprland
 import Quickshell.Io
 
 Scope {
@@ -27,6 +30,7 @@ Scope {
 	property string errorText: ""
 	property bool errorRecovered: false
 	property string statusOutput: ""
+	property int statusExitCode: 0
 	property string actionOutput: ""
 	property string actionStderr: ""
 	property int actionExitCode: 0
@@ -38,15 +42,19 @@ Scope {
 	readonly property bool externalAvailable: statusData.externalAvailable === true
 	readonly property var outputs: statusData.outputs || []
 	readonly property color healthColor: health === "error"
-		? error
+		? danger
 		: health === "warning"
 			? warning
-			: health === "idle" ? muted : success
-	readonly property string healthLabel: health === "error"
-		? "ERROR"
-		: health === "warning"
-			? "ATTENTION"
-			: health === "idle" ? "WAITING" : "READY"
+			: health === "idle" ? dim : good
+	readonly property var focusedScreen: {
+		const monitor = Hyprland.focusedMonitor;
+		const wanted = monitor ? monitor.name : "";
+		for (let index = 0; index < Quickshell.screens.length; index++) {
+			if (Quickshell.screens[index].name === wanted)
+				return Quickshell.screens[index];
+		}
+		return Quickshell.screens.length > 0 ? Quickshell.screens[0] : null;
+	}
 
 	function colorValue(value, fallback) {
 		if (value === undefined || value === null)
@@ -72,34 +80,38 @@ Scope {
 		return fallback;
 	}
 
-	readonly property color background: token("surface", "#141318")
-	readonly property color surfaceLow: token("surfaceContainerLow", "#1d1b20")
-	readonly property color surface: token("surfaceContainer", "#211f24")
-	readonly property color surfaceHigh: token("surfaceContainerHigh", "#2b292f")
-	readonly property color surfaceHighest: token("surfaceContainerHighest", "#36343a")
-	readonly property color primary: token("primary", "#c7c4ff")
-	readonly property color primaryContainer: token("primaryContainer", "#4b4a77")
-	readonly property color secondary: token("secondary", "#c8c5df")
-	readonly property color secondaryContainer: token("secondaryContainer", "#45445a")
-	readonly property color tertiary: token("tertiary", "#efb6dc")
-	readonly property color tertiaryContainer: token("tertiaryContainer", "#684d60")
-	readonly property color textStrong: token("onSurface", "#e7e1e8")
-	readonly property color muted: token("onSurfaceVariant", "#cac4cf")
-	readonly property color outline: token("outline", "#948f99")
-	readonly property color outlineVariant: token("outlineVariant", "#49464f")
-	readonly property color error: token("error", "#ffb4ab")
-	readonly property color errorContainer: token("errorContainer", "#93000a")
-	readonly property color success: token("success", "#b5ccba")
-	readonly property color warning: token("yellow", "#f0d78c")
+	function faded(value, opacity) {
+		return Qt.rgba(value.r, value.g, value.b, opacity);
+	}
+
+	readonly property color background: token("surface", "#111113")
+	readonly property color surface: token("surfaceContainer", "#1b1b1e")
+	readonly property color hover: token("surfaceContainerHigh", "#26262a")
+	readonly property color active: token("primary", "#d6d3ff")
+	readonly property color laptopAccent: token("secondary", "#c9c5df")
+	readonly property color projectorAccent: token("tertiary", "#efb6dc")
+	readonly property color text: token("onSurface", "#eeecef")
+	readonly property color dim: token("onSurfaceVariant", "#aaa7af")
+	readonly property color line: token("outlineVariant", "#45444a")
+	readonly property color danger: token("error", "#ffb4ab")
+	readonly property color warning: token("yellow", "#e7c66b")
+	readonly property color good: token("success", "#9fd3ad")
 
 	function loadScheme() {
 		try {
 			const raw = schemeFile.text();
-			if (raw && raw.length > 0)
-				scheme = JSON.parse(raw);
+			scheme = raw && raw.length > 0 ? JSON.parse(raw) : {};
 		} catch (error) {
 			scheme = {};
 		}
+	}
+
+	function modeAccent(mode) {
+		if (mode === "builtin")
+			return laptopAccent;
+		if (mode === "external")
+			return projectorAccent;
+		return active;
 	}
 
 	function parsePayload(raw) {
@@ -123,8 +135,30 @@ Scope {
 		statusProcess.exec(["projectorctl", "status"]);
 	}
 
+	function finishStatus() {
+		statusBusy = false;
+		const payload = parsePayload(statusOutput);
+		if (payload) {
+			applyStatus(payload);
+			return;
+		}
+		if (statusExitCode !== 0) {
+			statusData = {
+				ok: false,
+				mode: "unavailable",
+				modeLabel: "Display service unavailable",
+				health: "error",
+				message: "projectorctl did not return a status",
+				externalAvailable: false,
+				outputs: []
+			};
+		}
+	}
+
 	function applyMode(action) {
-		if (actionBusy)
+		if (actionBusy || action === currentMode)
+			return;
+		if (action !== "builtin" && !externalAvailable)
 			return;
 		actionBusy = true;
 		pendingAction = action;
@@ -157,7 +191,7 @@ Scope {
 		else if (actionStderr.trim().length > 0)
 			errorText = actionStderr.trim();
 		else
-			errorText = "The display mode could not be applied";
+			errorText = "That layout did not stick";
 		refreshAfterError.start();
 	}
 
@@ -195,6 +229,40 @@ Scope {
 		return null;
 	}
 
+	function outputDetail(output) {
+		if (!output)
+			return "not connected";
+		if (output.active !== true)
+			return "connected, off";
+		return (output.width || 0) + "×" + (output.height || 0)
+			+ "  " + Math.round(output.refreshRate || 0) + " Hz";
+	}
+
+	function handleKey(event) {
+		if (event.key === Qt.Key_Escape) {
+			closePanel();
+			event.accepted = true;
+		} else if (event.key === Qt.Key_R) {
+			requestStatus();
+			event.accepted = true;
+		} else if (event.key === Qt.Key_1) {
+			applyMode("builtin");
+			event.accepted = true;
+		} else if (event.key === Qt.Key_2) {
+			applyMode("duplicate");
+			event.accepted = true;
+		} else if (event.key === Qt.Key_3) {
+			applyMode("external");
+			event.accepted = true;
+		} else if (event.key === Qt.Key_4) {
+			applyMode("extend-right");
+			event.accepted = true;
+		} else if (event.key === Qt.Key_5) {
+			applyMode("extend-left");
+			event.accepted = true;
+		}
+	}
+
 	FileView {
 		id: schemeFile
 		path: root.homeDir + "/.local/state/caelestia/scheme.json"
@@ -212,20 +280,8 @@ Scope {
 		}
 		stderr: StdioCollector {}
 		onExited: function(exitCode) {
-			root.statusBusy = false;
-			const payload = root.parsePayload(root.statusOutput);
-			if (payload)
-				root.applyStatus(payload);
-			else if (exitCode !== 0)
-				root.statusData = {
-					ok: false,
-					mode: "unavailable",
-					modeLabel: "Display service unavailable",
-					health: "error",
-					message: "Could not read projector status",
-					externalAvailable: false,
-					outputs: []
-				};
+			root.statusExitCode = exitCode;
+			statusResultDelay.restart();
 		}
 	}
 
@@ -245,7 +301,7 @@ Scope {
 
 	Timer {
 		id: startupTimer
-		interval: 80
+		interval: 60
 		running: true
 		repeat: false
 		onTriggered: {
@@ -255,10 +311,17 @@ Scope {
 	}
 
 	Timer {
-		interval: 1500
+		interval: 1800
 		running: root.panelVisible
 		repeat: true
 		onTriggered: root.requestStatus()
+	}
+
+	Timer {
+		id: statusResultDelay
+		interval: 20
+		repeat: false
+		onTriggered: root.finishStatus()
 	}
 
 	Timer {
@@ -277,383 +340,440 @@ Scope {
 
 	Timer {
 		id: closeTimer
-		interval: 260
+		interval: 320
 		repeat: false
 		onTriggered: root.closePanel()
 	}
 
-	Variants {
-		model: Quickshell.screens
+	FloatingWindow {
+		id: panelWindow
+		screen: root.focusedScreen
+		visible: root.panelVisible && root.focusedScreen !== null
+		title: "projector"
+		implicitWidth: 460
+		implicitHeight: 566
+		minimumSize.width: 430
+		minimumSize.height: 540
+		maximumSize.width: 500
+		maximumSize.height: 620
+		color: "transparent"
 
-		FloatingWindow {
-			id: panelWindow
-			property var modelData
-			screen: modelData
+		Rectangle {
+			anchors.fill: parent
+			radius: 11
+			color: root.background
+			border.color: root.faded(root.line, 0.8)
+			border.width: 1
+			focus: true
+			Keys.onPressed: event => root.handleKey(event)
+			Component.onCompleted: forceActiveFocus()
 
-			visible: root.panelVisible
-			title: "Projector"
-			implicitWidth: 560
-			implicitHeight: 520
-			minimumSize.width: 520
-			minimumSize.height: 500
-			maximumSize.width: 600
-			maximumSize.height: 560
-			color: "transparent"
-
-			Rectangle {
+			ColumnLayout {
 				anchors.fill: parent
-				radius: 8
-				color: root.background
-				border.color: Qt.rgba(root.outline.r, root.outline.g, root.outline.b, 0.34)
-				border.width: 1
-				focus: true
-				Keys.onEscapePressed: root.closePanel()
-				Component.onCompleted: forceActiveFocus()
+				anchors.margins: 20
+				spacing: 0
 
-				ColumnLayout {
-					anchors.fill: parent
-					anchors.margins: 16
-					spacing: 12
+				RowLayout {
+					Layout.fillWidth: true
+					Layout.preferredHeight: 48
+					spacing: 10
 
-					RowLayout {
+					ColumnLayout {
 						Layout.fillWidth: true
-						Layout.preferredHeight: 34
-						spacing: 8
+						spacing: 1
 
 						Text {
-							text: "PROJECTOR"
-							color: root.muted
-							font.pixelSize: 11
+							text: "projector"
+							color: root.text
+							font.pixelSize: 21
 							font.weight: Font.DemiBold
-							font.letterSpacing: 0
+						}
+
+						Text {
 							Layout.fillWidth: true
-						}
-
-						ToolButton {
-							id: refreshButton
-							text: "↻"
-							font.pixelSize: 18
-							implicitWidth: 34
-							implicitHeight: 34
-							enabled: !root.actionBusy
-							onClicked: root.requestStatus()
-							ToolTip.visible: hovered
-							ToolTip.text: "Refresh display status"
-							background: Rectangle {
-								radius: 6
-								color: refreshButton.hovered ? root.surfaceHighest : root.surface
-								border.color: root.outlineVariant
-							}
-							contentItem: Text {
-								text: refreshButton.text
-								color: root.textStrong
-								font: refreshButton.font
-								horizontalAlignment: Text.AlignHCenter
-								verticalAlignment: Text.AlignVCenter
-							}
-						}
-
-						ToolButton {
-							id: closeButton
-							text: "×"
-							font.pixelSize: 19
-							implicitWidth: 34
-							implicitHeight: 34
-							onClicked: root.closePanel()
-							ToolTip.visible: hovered
-							ToolTip.text: "Close"
-							background: Rectangle {
-								radius: 6
-								color: closeButton.hovered ? Qt.rgba(root.error.r, root.error.g, root.error.b, 0.14) : root.surface
-								border.color: closeButton.hovered ? Qt.rgba(root.error.r, root.error.g, root.error.b, 0.5) : root.outlineVariant
-							}
-							contentItem: Text {
-								text: closeButton.text
-								color: closeButton.hovered ? root.error : root.textStrong
-								font: closeButton.font
-								horizontalAlignment: Text.AlignHCenter
-								verticalAlignment: Text.AlignVCenter
-							}
+							text: root.externalOutput()
+								? root.externalOutput().name + " · " + root.externalOutput().description
+								: "no external display connected"
+							color: root.dim
+							font.pixelSize: 10
+							elide: Text.ElideRight
 						}
 					}
+
+					QuietButton {
+						glyph: "↻"
+						accessibleName: "Refresh status"
+						enabled: !root.actionBusy
+						onClicked: root.requestStatus()
+					}
+
+					QuietButton {
+						glyph: "×"
+						accessibleName: "Close"
+						onClicked: root.closePanel()
+					}
+				}
+
+				RowLayout {
+					Layout.fillWidth: true
+					Layout.preferredHeight: 34
+					spacing: 8
 
 					Rectangle {
-						Layout.fillWidth: true
-						Layout.preferredHeight: 88
-						radius: 6
-						color: root.surfaceLow
-						border.color: Qt.rgba(root.healthColor.r, root.healthColor.g, root.healthColor.b, 0.45)
-						border.width: 1
-
-						Rectangle {
-							width: 4
-							height: parent.height - 16
-							anchors.left: parent.left
-							anchors.leftMargin: 8
-							anchors.verticalCenter: parent.verticalCenter
-							radius: 2
-							color: root.healthColor
-						}
-
-						ColumnLayout {
-							anchors.fill: parent
-							anchors.leftMargin: 24
-							anchors.rightMargin: 12
-							anchors.topMargin: 10
-							anchors.bottomMargin: 10
-							spacing: 3
-
-							RowLayout {
-								Layout.fillWidth: true
-								spacing: 8
-
-								Text {
-									text: "CURRENT MODE"
-									color: root.muted
-									font.pixelSize: 10
-									font.weight: Font.DemiBold
-									font.letterSpacing: 0
-									Layout.fillWidth: true
-								}
-
-								Rectangle {
-									implicitWidth: healthText.implicitWidth + 18
-									implicitHeight: 22
-									radius: 5
-									color: Qt.rgba(root.healthColor.r, root.healthColor.g, root.healthColor.b, 0.12)
-									border.color: Qt.rgba(root.healthColor.r, root.healthColor.g, root.healthColor.b, 0.42)
-
-									Text {
-										id: healthText
-										anchors.centerIn: parent
-										text: root.healthLabel
-										color: root.healthColor
-										font.pixelSize: 9
-										font.weight: Font.Bold
-										font.letterSpacing: 0
-									}
-								}
-							}
-
-							Text {
-								Layout.fillWidth: true
-								text: root.currentModeLabel
-									color: root.textStrong
-								font.pixelSize: 23
-								font.weight: Font.DemiBold
-								elide: Text.ElideRight
-							}
-
-							Text {
-								Layout.fillWidth: true
-								text: root.statusMessage
-								color: root.muted
-								font.pixelSize: 11
-								elide: Text.ElideRight
-							}
-						}
-					}
-
-					RowLayout {
-						Layout.fillWidth: true
-						Layout.preferredHeight: 58
-						spacing: 8
-
-						OutputTile {
-							Layout.fillWidth: true
-							outputData: root.internalOutput()
-							roleLabel: "Laptop"
-							accent: root.secondary
-						}
-
-						OutputTile {
-							Layout.fillWidth: true
-							outputData: root.externalOutput()
-							roleLabel: "Projector"
-							accent: root.tertiary
-						}
+						implicitWidth: 8
+						implicitHeight: 8
+						radius: 4
+						color: root.healthColor
 					}
 
 					Text {
-						text: "CHOOSE A MODE"
-						color: root.muted
-						font.pixelSize: 10
+						text: root.currentModeLabel
+						color: root.text
+						font.pixelSize: 12
 						font.weight: Font.DemiBold
-						font.letterSpacing: 0
 					}
 
-					GridLayout {
+					Text {
+						text: "—"
+						color: root.line
+						font.pixelSize: 11
+					}
+
+					Text {
 						Layout.fillWidth: true
-						Layout.fillHeight: true
-						columns: 2
-						columnSpacing: 8
-						rowSpacing: 8
+						text: root.statusBusy ? "checking…" : root.statusMessage
+						color: root.dim
+						font.pixelSize: 10
+						elide: Text.ElideRight
+					}
+				}
 
-						ModeButton {
-							Layout.fillWidth: true
-							Layout.preferredHeight: 72
-							actionId: "duplicate"
-							iconGlyph: "⧉"
-							label: "Duplicate"
-							description: "One shared desktop and pointer"
-							accent: root.primary
-							accentSurface: root.primaryContainer
-							onClicked: root.applyMode(actionId)
-						}
+				DisplayPair {
+					Layout.fillWidth: true
+					Layout.preferredHeight: 72
+					laptop: root.internalOutput()
+					projector: root.externalOutput()
+				}
 
-						ModeButton {
-							Layout.fillWidth: true
-							Layout.preferredHeight: 72
-							actionId: "external"
-							iconGlyph: "▰"
-							label: "Projector only"
-							description: "Laptop panel wakes if unplugged"
-							accent: root.tertiary
-							accentSurface: root.tertiaryContainer
-							onClicked: root.applyMode(actionId)
-						}
+				Text {
+					Layout.topMargin: 16
+					Layout.bottomMargin: 8
+					text: "Where should this desktop go?"
+					color: root.text
+					font.pixelSize: 12
+					font.weight: Font.DemiBold
+				}
 
-						ModeButton {
+				Rectangle {
+					Layout.fillWidth: true
+					Layout.preferredHeight: 286
+					radius: 8
+					color: root.surface
+					border.color: root.line
+					border.width: 1
+
+					ColumnLayout {
+						anchors.fill: parent
+						anchors.margins: 1
+						spacing: 0
+
+						ModeRow {
 							Layout.fillWidth: true
-							Layout.preferredHeight: 72
+							Layout.fillHeight: true
 							actionId: "builtin"
-							iconGlyph: "▣"
-							label: "Laptop only"
-							description: "Disable external displays"
-							accent: root.secondary
-							accentSurface: root.secondaryContainer
+							shortcutText: "1"
+							titleText: "Laptop only"
+							detailText: "Turn every external display off"
 							externalRequired: false
 							onClicked: root.applyMode(actionId)
 						}
 
-						ModeButton {
+						Hairline { Layout.fillWidth: true }
+
+						ModeRow {
 							Layout.fillWidth: true
-							Layout.preferredHeight: 72
-							actionId: "extend-right"
-							iconGlyph: "▣ → ▰"
-							label: "Extend right"
-							description: "Projector on the right"
-							accent: root.primary
-							accentSurface: root.primaryContainer
+							Layout.fillHeight: true
+							actionId: "duplicate"
+							shortcutText: "2"
+							titleText: "Mirror"
+							detailText: "Show the same desktop on both"
 							onClicked: root.applyMode(actionId)
 						}
 
-						ModeButton {
+						Hairline { Layout.fillWidth: true }
+
+						ModeRow {
 							Layout.fillWidth: true
-							Layout.preferredHeight: 72
+							Layout.fillHeight: true
+							actionId: "external"
+							shortcutText: "3"
+							titleText: "Projector only"
+							detailText: "Laptop wakes if the cable comes out"
+							onClicked: root.applyMode(actionId)
+						}
+
+						Hairline { Layout.fillWidth: true }
+
+						ModeRow {
+							Layout.fillWidth: true
+							Layout.fillHeight: true
+							actionId: "extend-right"
+							shortcutText: "4"
+							titleText: "Extend right"
+							detailText: "Put the projector to the right"
+							onClicked: root.applyMode(actionId)
+						}
+
+						Hairline { Layout.fillWidth: true }
+
+						ModeRow {
+							Layout.fillWidth: true
+							Layout.fillHeight: true
 							actionId: "extend-left"
-							iconGlyph: "▰ ← ▣"
-							label: "Extend left"
-							description: "Projector on the left"
-							accent: root.tertiary
-							accentSurface: root.tertiaryContainer
+							shortcutText: "5"
+							titleText: "Extend left"
+							detailText: "Put the projector to the left"
 							onClicked: root.applyMode(actionId)
 						}
 					}
+				}
 
-					Rectangle {
+				RowLayout {
+					Layout.fillWidth: true
+					Layout.fillHeight: true
+					Layout.minimumHeight: 34
+					spacing: 8
+
+					Text {
 						Layout.fillWidth: true
-						Layout.preferredHeight: 38
-						radius: 6
-						color: root.errorAction.length > 0
-							? Qt.rgba(root.errorContainer.r, root.errorContainer.g, root.errorContainer.b, 0.42)
-							: root.surfaceLow
-						border.color: root.errorAction.length > 0
-							? Qt.rgba(root.error.r, root.error.g, root.error.b, 0.55)
-							: root.outlineVariant
-
-						RowLayout {
-							anchors.fill: parent
-							anchors.leftMargin: 10
-							anchors.rightMargin: 10
-							spacing: 8
-
-							Rectangle {
-								implicitWidth: 8
-								implicitHeight: 8
-								radius: 4
-								color: root.errorAction.length > 0 ? root.error : root.healthColor
-							}
-
-							Text {
-								Layout.fillWidth: true
-								text: root.errorAction.length > 0
-									? root.errorText + (root.errorRecovered ? " - laptop display restored" : "")
-									: root.actionBusy ? "Applying display mode..." : root.statusMessage
-								color: root.errorAction.length > 0 ? root.error : root.muted
-								font.pixelSize: 10
-								elide: Text.ElideRight
-								verticalAlignment: Text.AlignVCenter
-							}
-						}
+						text: root.errorAction.length > 0
+							? root.errorText + (root.errorRecovered ? " · laptop restored" : "")
+							: root.actionBusy ? "changing layout…" : "Esc closes · R checks again"
+						color: root.errorAction.length > 0 ? root.danger : root.dim
+						font.pixelSize: 10
+						elide: Text.ElideRight
 					}
 				}
 			}
 		}
 	}
 
-	component OutputTile: Rectangle {
-		required property var outputData
-		required property string roleLabel
-		required property color accent
-		readonly property bool detected: outputData !== null && outputData !== undefined
-		readonly property bool active: detected && outputData.active === true
-		readonly property string outputName: detected ? outputData.name : "Not detected"
-		readonly property string outputDetail: !detected
-			? "Disconnected"
-			: active
-				? (outputData.width || 0) + " x " + (outputData.height || 0) + " / " + Math.round(outputData.refreshRate || 0) + " Hz"
-				: "Connected / off"
+	component Hairline: Rectangle {
+		implicitHeight: 1
+		color: root.line
+		opacity: 0.65
+	}
 
-		implicitHeight: 58
-		radius: 6
-		color: root.surface
-		border.color: active
-			? Qt.rgba(accent.r, accent.g, accent.b, 0.42)
-			: root.outlineVariant
+	component QuietButton: Button {
+		id: quietButton
+
+		required property string glyph
+		required property string accessibleName
+
+		text: glyph
+		Accessible.name: accessibleName
+		implicitWidth: 32
+		implicitHeight: 32
+		padding: 0
+
+		background: Rectangle {
+			radius: 6
+			color: quietButton.down
+				? root.faded(root.text, 0.12)
+				: quietButton.hovered ? root.hover : "transparent"
+		}
+
+		contentItem: Text {
+			text: quietButton.glyph
+			color: quietButton.enabled ? root.dim : root.faded(root.dim, 0.4)
+			font.pixelSize: quietButton.glyph === "×" ? 20 : 17
+			horizontalAlignment: Text.AlignHCenter
+			verticalAlignment: Text.AlignVCenter
+		}
+	}
+
+	component DisplayPair: Rectangle {
+		id: pair
+
+		required property var laptop
+		required property var projector
+		readonly property bool projectorFirst: root.currentMode === "extend-left"
+
+		radius: 8
+		color: root.faded(root.surface, 0.62)
+		border.color: root.line
 		border.width: 1
 
 		RowLayout {
 			anchors.fill: parent
-			anchors.margins: 10
-			spacing: 9
+			anchors.leftMargin: 14
+			anchors.rightMargin: 14
+			spacing: 12
+			layoutDirection: pair.projectorFirst ? Qt.RightToLeft : Qt.LeftToRight
+
+			MonitorLabel {
+				Layout.fillWidth: true
+				outputData: pair.laptop
+				roleName: "laptop"
+				alignRight: pair.projectorFirst
+				accentColor: root.laptopAccent
+			}
+
+			Text {
+				text: root.currentMode === "duplicate"
+					? "="
+					: root.currentMode === "extend-left"
+						? "←"
+						: root.currentMode === "extend-right" ? "→" : "·"
+				color: root.externalAvailable ? root.active : root.line
+				font.pixelSize: 18
+				font.weight: Font.DemiBold
+			}
+
+			MonitorLabel {
+				Layout.fillWidth: true
+				outputData: pair.projector
+				roleName: "projector"
+				alignRight: !pair.projectorFirst
+				accentColor: root.projectorAccent
+			}
+		}
+	}
+
+	component MonitorLabel: RowLayout {
+		id: monitorLabel
+
+		required property var outputData
+		required property string roleName
+		required property color accentColor
+		property bool alignRight: false
+		readonly property bool isActive: outputData && outputData.active === true
+
+		layoutDirection: alignRight ? Qt.RightToLeft : Qt.LeftToRight
+		spacing: 9
+
+		Item {
+			Layout.preferredWidth: 30
+			Layout.preferredHeight: 28
 
 			Rectangle {
-				implicitWidth: 9
-				implicitHeight: 36
-				radius: 4
-				color: active ? accent : root.outline
-				opacity: active ? 1 : 0.5
+				width: 28
+				height: 18
+				anchors.top: parent.top
+				anchors.horizontalCenter: parent.horizontalCenter
+				radius: 2
+				color: "transparent"
+				border.width: 2
+				border.color: monitorLabel.isActive ? monitorLabel.accentColor : root.line
+			}
+
+			Rectangle {
+				width: 2
+				height: 5
+				anchors.top: parent.top
+				anchors.topMargin: 18
+				anchors.horizontalCenter: parent.horizontalCenter
+				color: monitorLabel.isActive ? monitorLabel.accentColor : root.line
+			}
+
+			Rectangle {
+				width: 14
+				height: 2
+				anchors.bottom: parent.bottom
+				anchors.horizontalCenter: parent.horizontalCenter
+				radius: 1
+				color: monitorLabel.isActive ? monitorLabel.accentColor : root.line
+			}
+		}
+
+		ColumnLayout {
+			Layout.fillWidth: true
+			spacing: 1
+
+			Text {
+				Layout.fillWidth: true
+				text: monitorLabel.outputData ? monitorLabel.outputData.name : monitorLabel.roleName
+				color: monitorLabel.outputData ? root.text : root.dim
+				font.pixelSize: 11
+				font.weight: Font.DemiBold
+				horizontalAlignment: monitorLabel.alignRight ? Text.AlignRight : Text.AlignLeft
+				elide: Text.ElideRight
+			}
+
+			Text {
+				Layout.fillWidth: true
+				text: root.outputDetail(monitorLabel.outputData)
+				color: root.dim
+				font.pixelSize: 9
+				horizontalAlignment: monitorLabel.alignRight ? Text.AlignRight : Text.AlignLeft
+				elide: Text.ElideRight
+			}
+		}
+	}
+
+	component ModeRow: Button {
+		id: modeRow
+
+		required property string actionId
+		required property string shortcutText
+		required property string titleText
+		required property string detailText
+		property bool externalRequired: true
+		readonly property bool isCurrent: root.currentMode === actionId
+		readonly property bool isPending: root.pendingAction === actionId
+		readonly property bool isError: root.errorAction === actionId
+		readonly property bool unavailable: externalRequired && !root.externalAvailable
+		readonly property color rowAccent: root.modeAccent(actionId)
+
+		text: titleText
+		Accessible.description: detailText
+		enabled: !root.actionBusy && !unavailable && !isCurrent
+		opacity: unavailable ? 0.42 : 1
+		leftPadding: 12
+		rightPadding: 12
+		topPadding: 5
+		bottomPadding: 5
+
+		background: Rectangle {
+			radius: 7
+			color: modeRow.isError
+				? root.faded(root.danger, 0.1)
+				: modeRow.isCurrent
+					? root.faded(modeRow.rowAccent, 0.1)
+					: modeRow.down
+						? root.faded(root.text, 0.1)
+						: modeRow.hovered ? root.hover : "transparent"
+
+			Rectangle {
+				visible: modeRow.isCurrent || modeRow.isPending
+				width: 3
+				height: 24
+				anchors.left: parent.left
+				anchors.leftMargin: 4
+				anchors.verticalCenter: parent.verticalCenter
+				radius: 2
+				color: modeRow.rowAccent
+			}
+		}
+
+		contentItem: RowLayout {
+			spacing: 11
+
+			DisplaySketch {
+				Layout.preferredWidth: 62
+				Layout.preferredHeight: 32
+				modeId: modeRow.actionId
+				lit: !modeRow.unavailable
 			}
 
 			ColumnLayout {
 				Layout.fillWidth: true
 				spacing: 1
 
-				RowLayout {
-					Layout.fillWidth: true
-					spacing: 6
-
-					Text {
-						text: roleLabel
-						color: root.muted
-						font.pixelSize: 9
-						font.weight: Font.DemiBold
-						Layout.fillWidth: true
-					}
-
-					Text {
-						text: active ? "ON" : "OFF"
-						color: active ? accent : root.outline
-						font.pixelSize: 8
-						font.weight: Font.Bold
-					}
-				}
-
 				Text {
 					Layout.fillWidth: true
-					text: outputName
-					color: root.textStrong
+					text: modeRow.isPending ? "Changing…" : modeRow.titleText
+					color: modeRow.isError ? root.danger : root.text
 					font.pixelSize: 11
 					font.weight: Font.DemiBold
 					elide: Text.ElideRight
@@ -661,105 +781,97 @@ Scope {
 
 				Text {
 					Layout.fillWidth: true
-					text: outputDetail
-					color: root.muted
+					text: modeRow.unavailable ? "Connect an external display" : modeRow.detailText
+					color: modeRow.isError ? root.danger : root.dim
 					font.pixelSize: 9
 					elide: Text.ElideRight
 				}
+			}
+
+			Text {
+				text: modeRow.isCurrent ? "current" : modeRow.shortcutText
+				color: modeRow.isCurrent ? modeRow.rowAccent : root.dim
+				font.pixelSize: 9
+				font.weight: modeRow.isCurrent ? Font.DemiBold : Font.Normal
 			}
 		}
 	}
 
-	component ModeButton: Button {
-		id: modeButton
+	component DisplaySketch: Item {
+		id: sketch
 
-		required property string actionId
-		required property string iconGlyph
-		required property string label
-		required property string description
-		required property color accent
-		required property color accentSurface
-		property bool externalRequired: true
-		readonly property bool isPending: root.pendingAction === actionId
-		readonly property bool isError: root.errorAction === actionId
-		readonly property bool isSelected: root.currentMode === actionId
-		readonly property bool unavailable: externalRequired && !root.externalAvailable
-		readonly property string displayLabel: isError ? "Error" : isPending ? "Applying..." : label
-		readonly property string displayDescription: isError
-			? root.errorText
-			: isPending
-				? "Verifying the new layout"
-				: unavailable ? "Connect a projector" : description
+		required property string modeId
+		required property bool lit
+		readonly property bool projectorFirst: modeId === "extend-left"
+		readonly property bool laptopOn: modeId !== "external"
+		readonly property bool projectorOn: modeId !== "builtin" && lit
+		readonly property int laptopX: projectorFirst ? 40 : 1
+		readonly property int projectorX: projectorFirst ? 1 : 40
 
-		visible: !isSelected || isPending || isError
-		enabled: !root.actionBusy && !unavailable
-		implicitHeight: 72
-		leftPadding: 10
-		rightPadding: 10
-		topPadding: 8
-		bottomPadding: 8
-		opacity: unavailable ? 0.52 : 1
-
-		background: Rectangle {
-			radius: 6
-			color: modeButton.isError
-				? Qt.rgba(root.errorContainer.r, root.errorContainer.g, root.errorContainer.b, 0.48)
-				: modeButton.isPending
-					? Qt.rgba(accentSurface.r, accentSurface.g, accentSurface.b, 0.4)
-					: modeButton.down
-						? root.surfaceHighest
-						: modeButton.hovered ? Qt.rgba(accentSurface.r, accentSurface.g, accentSurface.b, 0.3) : root.surface
-			border.color: modeButton.isError
-				? root.error
-				: modeButton.hovered ? Qt.rgba(accent.r, accent.g, accent.b, 0.62) : root.outlineVariant
-			border.width: 1
+		Rectangle {
+			x: sketch.laptopX
+			y: 5
+			width: 20
+			height: 14
+			radius: 2
+			color: "transparent"
+			border.width: 2
+			border.color: sketch.laptopOn ? root.laptopAccent : root.line
+			opacity: sketch.laptopOn ? 1 : 0.5
 		}
 
-		contentItem: RowLayout {
-			spacing: 10
+		Rectangle {
+			x: sketch.laptopX - 2
+			y: 21
+			width: 24
+			height: 2
+			radius: 1
+			color: sketch.laptopOn ? root.laptopAccent : root.line
+			opacity: sketch.laptopOn ? 1 : 0.5
+		}
 
-			Rectangle {
-				Layout.preferredWidth: 46
-				Layout.preferredHeight: 46
-				radius: 6
-				color: modeButton.isError
-					? Qt.rgba(root.error.r, root.error.g, root.error.b, 0.1)
-					: Qt.rgba(accentSurface.r, accentSurface.g, accentSurface.b, 0.34)
-				border.color: modeButton.isError
-					? Qt.rgba(root.error.r, root.error.g, root.error.b, 0.5)
-					: Qt.rgba(accent.r, accent.g, accent.b, 0.32)
+		Rectangle {
+			x: sketch.projectorX
+			y: 4
+			width: 21
+			height: 16
+			radius: 2
+			color: "transparent"
+			border.width: 2
+			border.color: sketch.projectorOn ? root.projectorAccent : root.line
+			opacity: sketch.projectorOn ? 1 : 0.5
+		}
 
-				Text {
-					anchors.centerIn: parent
-					text: modeButton.isError ? "!" : modeButton.iconGlyph
-					color: modeButton.isError ? root.error : accent
-					font.pixelSize: modeButton.iconGlyph.length > 3 ? 14 : 25
-					font.weight: Font.DemiBold
-				}
-			}
+		Rectangle {
+			x: sketch.projectorX + 9
+			y: 20
+			width: 2
+			height: 4
+			color: sketch.projectorOn ? root.projectorAccent : root.line
+			opacity: sketch.projectorOn ? 1 : 0.5
+		}
 
-			ColumnLayout {
-				Layout.fillWidth: true
-				spacing: 3
+		Rectangle {
+			x: sketch.projectorX + 4
+			y: 24
+			width: 12
+			height: 2
+			radius: 1
+			color: sketch.projectorOn ? root.projectorAccent : root.line
+			opacity: sketch.projectorOn ? 1 : 0.5
+		}
 
-				Text {
-					Layout.fillWidth: true
-					text: modeButton.displayLabel
-					color: modeButton.isError ? root.error : root.textStrong
-					font.pixelSize: 12
-					font.weight: Font.DemiBold
-					elide: Text.ElideRight
-				}
-
-				Text {
-					Layout.fillWidth: true
-					text: modeButton.displayDescription
-					color: modeButton.isError ? root.error : root.muted
-					font.pixelSize: 9
-					elide: Text.ElideRight
-					maximumLineCount: 1
-				}
-			}
+		Text {
+			visible: sketch.modeId === "duplicate" || sketch.modeId.indexOf("extend-") === 0
+			x: 25
+			y: 4
+			width: 12
+			height: 20
+			text: sketch.modeId === "duplicate" ? "=" : "—"
+			color: sketch.lit ? root.active : root.line
+			font.pixelSize: sketch.modeId === "duplicate" ? 12 : 10
+			horizontalAlignment: Text.AlignHCenter
+			verticalAlignment: Text.AlignVCenter
 		}
 	}
 }

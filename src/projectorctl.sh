@@ -684,7 +684,7 @@ apply_extended() {
 	wait_for_output "$EXTERNAL_OUTPUT" active || return 1
 	wait_for_no_other_external "$EXTERNAL_OUTPUT" || return 1
 	wait_for_extended_layout "$direction" || return 1
-	write_state "extend-$direction" "$BUILTIN_OUTPUT" "$EXTERNAL_OUTPUT" "Desktop extended $direction" info
+	write_state "extend-$direction" "$BUILTIN_OUTPUT" "$EXTERNAL_OUTPUT" "Projector is on the $direction" info
 }
 
 apply_duplicate() {
@@ -715,14 +715,14 @@ apply_duplicate() {
 		LAST_ERROR="Hyprland did not create a shared duplicate layout"
 		return 1
 	}
-	write_state duplicate "$BUILTIN_OUTPUT" "$EXTERNAL_OUTPUT" "Shared duplicate layout is active" info
+	write_state duplicate "$BUILTIN_OUTPUT" "$EXTERNAL_OUTPUT" "Mirroring on $EXTERNAL_OUTPUT" info
 }
 
 mode_label() {
 	case "$1" in
 		builtin) printf 'Laptop only' ;;
 		external) printf 'Projector only' ;;
-		duplicate) printf 'Duplicate' ;;
+		duplicate) printf 'Mirror' ;;
 		extend-right) printf 'Extend right' ;;
 		extend-left) printf 'Extend left' ;;
 		extended) printf 'Extended desktop' ;;
@@ -802,9 +802,9 @@ status_json() {
 		health="idle"
 		message="Connect a projector or external display"
 	elif [[ "$mode" == "external" ]]; then
-		message="Automatic laptop fallback is armed"
+		message="Only $EXTERNAL_OUTPUT is on; laptop fallback is ready"
 	elif [[ "$mode" == "duplicate" ]]; then
-		message="Safe duplicate stream is active"
+		message="Mirroring on $EXTERNAL_OUTPUT"
 	elif [[ -n "$event" ]]; then
 		message="$event"
 	fi
