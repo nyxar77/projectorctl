@@ -7,3 +7,6 @@ if projectorLayoutOk and type(projectorLayout) == "table" then
 		hl.monitor(rule)
 	end
 end
+
+-- This stays usable with every display black and does not depend on the panel.
+hl.bind("CTRL + ALT + F12", hl.dsp.exec_cmd("projectorctl recover"), { locked = true })

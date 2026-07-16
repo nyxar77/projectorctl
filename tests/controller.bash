@@ -9,6 +9,7 @@ trap 'rm -rf "$test_root"' EXIT
 export HOME="$test_root/home"
 export PROJECTORCTL_RUNTIME_DIR="$test_root/run"
 export PROJECTORCTL_LAYOUT_FILE="$test_root/layout.lua"
+export PROJECTORCTL_DRM_ROOT="$test_root/drm"
 mkdir -p "$HOME"
 
 # shellcheck source=/dev/null
@@ -187,6 +188,23 @@ forced_recovery_log="$test_root/forced-recovery.log"
 )
 assert_contains "$(<"$forced_recovery_log")" "Projector disconnected" "a removal event forces projector-only recovery"
 
+kernel_recovery_log="$test_root/kernel-recovery.log"
+mkdir -p "$PROJECTORCTL_DRM_ROOT/card1-HDMI-A-1"
+printf 'disconnected\n' > "$PROJECTORCTL_DRM_ROOT/card1-HDMI-A-1/status"
+(
+	write_state external eDP-1 HDMI-A-1 "" info
+	TEST_MONITORS="$monitors_three"
+	# shellcheck disable=SC2329
+	monitor_json() { printf '%s\n' "$TEST_MONITORS"; }
+	# shellcheck disable=SC2329
+	active_monitor_json() { printf '%s\n' "$TEST_MONITORS"; }
+	# shellcheck disable=SC2329
+	safe_recover() { printf '%s\n' "$1" > "$kernel_recovery_log"; }
+	recover_if_needed_locked 2>/dev/null
+)
+assert_contains "$(<"$kernel_recovery_log")" "Kernel reported the projector disconnected" "the kernel connector catches a missing projector behind stale Hyprland state"
+printf 'connected\n' > "$PROJECTORCTL_DRM_ROOT/card1-HDMI-A-1/status"
+
 poll_recovery_log="$test_root/poll-recovery.log"
 (
 	write_state external eDP-1 HDMI-A-1 "" info
@@ -200,6 +218,13 @@ poll_recovery_log="$test_root/poll-recovery.log"
 	recover_if_needed_locked 2>/dev/null
 )
 assert_contains "$(<"$poll_recovery_log")" "All displays went offline" "the watchdog uses active monitors instead of stale monitor records"
+
+dpms_log="$test_root/dpms.log"
+run_lua() { printf '%s\n' "$1" >> "$dpms_log"; }
+set_output_dpms eDP-1 on
+set_output_dpms eDP-1 off
+assert_contains "$(<"$dpms_log")" 'action = "enable"' "waking a display uses Hyprland's current DPMS action"
+assert_contains "$(<"$dpms_log")" 'action = "disable"' "sleeping a display uses Hyprland's current DPMS action"
 
 if main apply >/dev/null 2>&1; then
 	fail "apply without a mode should fail"

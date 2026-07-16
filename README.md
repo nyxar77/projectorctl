@@ -27,4 +27,6 @@ projectorctl apply external
 projectorctl recover
 ```
 
+If every display is black, press `Ctrl+Alt+F12` to restore the laptop panel directly. This emergency binding is installed by the Home Manager module and does not open the graphical panel.
+
 The module appends the required Lua layout loader to Hyprland's configuration. The panel follows Caelestia's scheme file when it is present and otherwise uses its built-in colors.

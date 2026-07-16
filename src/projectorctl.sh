@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 runtime_root="${PROJECTORCTL_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp}/projector-control-${UID}}"
 hypr_root="${PROJECTORCTL_HYPR_ROOT:-${XDG_RUNTIME_DIR:-/tmp}/hypr}"
+drm_root="${PROJECTORCTL_DRM_ROOT:-/sys/class/drm}"
 state_file="$runtime_root/state.json"
 layout_file="${PROJECTORCTL_LAYOUT_FILE:-${HOME}/.cache/hypr/projector-layout.lua}"
 operation_lock="$runtime_root/operation.lock"
@@ -196,6 +197,37 @@ output_exists() {
 	[[ -n "$output" ]] && jq -e --arg output "$output" 'any(.[]; .name == $output)' <<< "$monitors" >/dev/null
 }
 
+drm_connector_status() {
+	local output="$1"
+	local connector=""
+	local connector_state=""
+	local -a connectors=()
+
+	[[ -n "$output" ]] || return 1
+	shopt -s nullglob
+	connectors=("$drm_root"/card*-"$output"/status)
+	shopt -u nullglob
+
+	for connector in "${connectors[@]}"; do
+		[[ -r "$connector" ]] || continue
+		read -r connector_state < "$connector" || continue
+		case "$connector_state" in
+			connected|disconnected|unknown)
+				printf '%s\n' "$connector_state"
+				return 0
+				;;
+		esac
+	done
+	return 1
+}
+
+drm_connector_is_disconnected() {
+	local connector_state=""
+
+	connector_state="$(drm_connector_status "$1")" || return 1
+	[[ "$connector_state" == "disconnected" ]]
+}
+
 active_output_count() {
 	local monitors="$1"
 	jq -r --arg ignored "$ignored_output_pattern" '[.[] | select(
@@ -339,10 +371,20 @@ run_layout() {
 set_output_dpms() {
 	local output="$1"
 	local action="$2"
+	local api_action=""
 	local script=""
 
+	case "$action" in
+		on) api_action="enable" ;;
+		off) api_action="disable" ;;
+		toggle) api_action="toggle" ;;
+		*)
+			LAST_ERROR="Unknown DPMS action: $action"
+			return 1
+			;;
+	esac
 	printf -v script 'hl.dispatch(hl.dsp.dpms({ action = %s, monitor = %s }))' \
-		"$(lua_quote "$action")" "$(lua_quote "$output")"
+		"$(lua_quote "$api_action")" "$(lua_quote "$output")"
 	run_lua "$script"
 }
 
@@ -1027,6 +1069,19 @@ recover_if_needed_locked() {
 	requested="$(jq -r '.requestedMode // empty' <<< "$state")"
 	remembered_builtin="$(jq -r '.builtin // empty' <<< "$state")"
 	remembered_external="$(jq -r '.external // empty' <<< "$state")"
+
+	if [[ -n "$remembered_external" ]] && drm_connector_is_disconnected "$remembered_external"; then
+		case "$requested" in
+			external)
+				guard_recover "Kernel reported the projector disconnected; the laptop panel was restored" || true
+				return 0
+				;;
+			duplicate)
+				guard_recover "Kernel reported the mirror disconnected; the laptop panel was kept available" || true
+				return 0
+				;;
+		esac
+	fi
 
 	if [[ -n "$removed_output" && "$removed_output" == "$remembered_external" ]]; then
 		case "$requested" in
