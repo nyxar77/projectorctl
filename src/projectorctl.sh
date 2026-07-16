@@ -13,6 +13,7 @@ caelestia_bin="${PROJECTORCTL_CAELESTIA:-caelestia}"
 notify_bin="${PROJECTORCTL_NOTIFY_SEND:-notify-send}"
 
 internal_pattern='^(eDP|LVDS|DSI)(-|$)'
+ignored_output_pattern='^(HEADLESS|FALLBACK)(-|$)'
 BUILTIN_OUTPUT=""
 EXTERNAL_OUTPUT=""
 LAST_ERROR=""
@@ -126,11 +127,23 @@ select_outputs() {
 	' <<< "$monitors")"
 
 	remembered_external="$(state_field external)"
-	if [[ -n "$remembered_external" ]] && jq -e --arg output "$remembered_external" 'any(.[]; .name == $output)' <<< "$monitors" >/dev/null; then
+	if [[ -n "$remembered_external" ]] && jq -e \
+		--arg output "$remembered_external" \
+		--arg internal "$internal_pattern" \
+		--arg ignored "$ignored_output_pattern" '
+			any(.[];
+				.name == $output
+				and ((.name | test($internal; "i")) | not)
+				and ((.name | test($ignored; "i")) | not)
+			)
+		' <<< "$monitors" >/dev/null; then
 		EXTERNAL_OUTPUT="$remembered_external"
 	else
-		EXTERNAL_OUTPUT="$(jq -r --arg pattern "$internal_pattern" '
-			[.[] | select((.name | test($pattern; "i")) | not)]
+		EXTERNAL_OUTPUT="$(jq -r --arg internal "$internal_pattern" --arg ignored "$ignored_output_pattern" '
+			[.[] | select(
+				((.name | test($internal; "i")) | not)
+				and ((.name | test($ignored; "i")) | not)
+			)]
 			| sort_by([
 				if (.disabled // false) then 1 else 0 end,
 				if (.name | test("^HDMI"; "i")) then 0 else 1 end,
@@ -163,13 +176,18 @@ output_exists() {
 
 active_output_count() {
 	local monitors="$1"
-	jq -r '[.[] | select((.disabled // false) == false and (.dpmsStatus // true) == true)] | length' <<< "$monitors"
+	jq -r --arg ignored "$ignored_output_pattern" '[.[] | select(
+		((.name | test($ignored; "i")) | not)
+		and (.disabled // false) == false
+		and (.dpmsStatus // true) == true
+	)] | length' <<< "$monitors"
 }
 
 active_external_count() {
 	local monitors="$1"
-	jq -r --arg pattern "$internal_pattern" '[.[] | select(
-		((.name | test($pattern; "i")) | not)
+	jq -r --arg internal "$internal_pattern" --arg ignored "$ignored_output_pattern" '[.[] | select(
+		((.name | test($internal; "i")) | not)
+		and ((.name | test($ignored; "i")) | not)
 		and (.disabled // false) == false
 		and (.dpmsStatus // true) == true
 	)] | length' <<< "$monitors"
@@ -178,9 +196,10 @@ active_external_count() {
 other_external_is_active() {
 	local monitors="$1"
 	local selected="$2"
-	jq -e --arg pattern "$internal_pattern" --arg selected "$selected" '
+	jq -e --arg internal "$internal_pattern" --arg ignored "$ignored_output_pattern" --arg selected "$selected" '
 		any(.[];
-			((.name | test($pattern; "i")) | not)
+			((.name | test($internal; "i")) | not)
+			and ((.name | test($ignored; "i")) | not)
 			and .name != $selected
 			and (.disabled // false) == false
 			and (.dpmsStatus // true) == true
@@ -606,7 +625,12 @@ apply_builtin_only() {
 		LAST_ERROR="Could not verify connected displays"
 		return 1
 	}
-	mapfile -t external_outputs < <(jq -r --arg pattern "$internal_pattern" '.[] | select((.name | test($pattern; "i")) | not) | .name' <<< "$monitors")
+	mapfile -t external_outputs < <(jq -r --arg internal "$internal_pattern" --arg ignored "$ignored_output_pattern" '
+		.[] | select(
+			((.name | test($internal; "i")) | not)
+			and ((.name | test($ignored; "i")) | not)
+		) | .name
+	' <<< "$monitors")
 	rules+=("$(enable_rule "$monitors" "$BUILTIN_OUTPUT" "0x0")")
 	for output in "${external_outputs[@]}"; do
 		rules+=("$(disable_rule "$output")")
@@ -636,8 +660,12 @@ apply_external_only() {
 	current="$(monitor_json)" || return 1
 	rules+=("$(enable_rule "$current" "$EXTERNAL_OUTPUT" "0x0")")
 	rules+=("$(enable_rule "$current" "$BUILTIN_OUTPUT" "auto-left")")
-	mapfile -t other_outputs < <(jq -r --arg pattern "$internal_pattern" --arg selected "$EXTERNAL_OUTPUT" '
-		.[] | select(((.name | test($pattern; "i")) | not) and .name != $selected) | .name
+	mapfile -t other_outputs < <(jq -r --arg internal "$internal_pattern" --arg ignored "$ignored_output_pattern" --arg selected "$EXTERNAL_OUTPUT" '
+		.[] | select(
+			((.name | test($internal; "i")) | not)
+			and ((.name | test($ignored; "i")) | not)
+			and .name != $selected
+		) | .name
 	' <<< "$current")
 	for output in "${other_outputs[@]}"; do
 		rules+=("$(disable_rule "$output")")
@@ -672,8 +700,12 @@ apply_extended() {
 		rules+=("$(enable_rule "$current" "$EXTERNAL_OUTPUT" "0x0")")
 		rules+=("$(enable_rule "$current" "$BUILTIN_OUTPUT" "auto-right")")
 	fi
-	mapfile -t other_outputs < <(jq -r --arg pattern "$internal_pattern" --arg selected "$EXTERNAL_OUTPUT" '
-		.[] | select(((.name | test($pattern; "i")) | not) and .name != $selected) | .name
+	mapfile -t other_outputs < <(jq -r --arg internal "$internal_pattern" --arg ignored "$ignored_output_pattern" --arg selected "$EXTERNAL_OUTPUT" '
+		.[] | select(
+			((.name | test($internal; "i")) | not)
+			and ((.name | test($ignored; "i")) | not)
+			and .name != $selected
+		) | .name
 	' <<< "$current")
 	for output in "${other_outputs[@]}"; do
 		rules+=("$(disable_rule "$output")")
@@ -699,8 +731,12 @@ apply_duplicate() {
 	current="$(monitor_json)" || return 1
 	rules+=("$(enable_rule "$current" "$BUILTIN_OUTPUT" "0x0")")
 	rules+=("$(mirror_rule "$current" "$EXTERNAL_OUTPUT" "$BUILTIN_OUTPUT")")
-	mapfile -t other_outputs < <(jq -r --arg pattern "$internal_pattern" --arg selected "$EXTERNAL_OUTPUT" '
-		.[] | select(((.name | test($pattern; "i")) | not) and .name != $selected) | .name
+	mapfile -t other_outputs < <(jq -r --arg internal "$internal_pattern" --arg ignored "$ignored_output_pattern" --arg selected "$EXTERNAL_OUTPUT" '
+		.[] | select(
+			((.name | test($internal; "i")) | not)
+			and ((.name | test($ignored; "i")) | not)
+			and .name != $selected
+		) | .name
 	' <<< "$current")
 	for output in "${other_outputs[@]}"; do
 		rules+=("$(disable_rule "$output")")
@@ -809,7 +845,7 @@ status_json() {
 		message="$event"
 	fi
 
-	outputs="$(jq -c '[.[] | {
+	outputs="$(jq -c --arg internal "$internal_pattern" --arg ignored "$ignored_output_pattern" '[.[] | {
 		name,
 		description: (.description // .name),
 		active: ((.disabled // false) == false and (.dpmsStatus // true) == true),
@@ -821,7 +857,11 @@ status_json() {
 		scale: (.scale // 1),
 		x: (.x // 0),
 		y: (.y // 0),
-		internal: (.name | test("^(eDP|LVDS|DSI)(-|$)"; "i"))
+		internal: (.name | test($internal; "i")),
+		projector: (
+			((.name | test($internal; "i")) | not)
+			and ((.name | test($ignored; "i")) | not)
+		)
 	}]' <<< "$monitors")"
 
 	jq -cn \

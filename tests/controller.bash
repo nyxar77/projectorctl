@@ -44,6 +44,15 @@ assert_contains() {
 	pass "$message"
 }
 
+assert_not_contains() {
+	local haystack="$1"
+	local needle="$2"
+	local message="$3"
+
+	[[ "$haystack" != *"$needle"* ]] || fail "$message (found '$needle')"
+	pass "$message"
+}
+
 monitors_three='[
 	{"id":0,"name":"eDP-1","description":"Laptop panel","disabled":false,"dpmsStatus":true,"width":1920,"height":1080,"refreshRate":60,"scale":1,"transform":0,"x":0,"y":0,"mirrorOf":-1},
 	{"id":1,"name":"HDMI-A-1","description":"Projector","disabled":false,"dpmsStatus":true,"width":1920,"height":1080,"refreshRate":60,"scale":1,"transform":0,"x":1920,"y":0,"mirrorOf":0},
@@ -58,6 +67,25 @@ assert_eq DP-2 "$EXTERNAL_OUTPUT" "keeps the remembered external display"
 rm -f "$state_file"
 select_outputs "$monitors_three"
 assert_eq HDMI-A-1 "$EXTERNAL_OUTPUT" "prefers HDMI when there is no remembered display"
+
+virtual_only="$(jq -c '.[0:1] + [{
+	"id": 8,
+	"name": "HEADLESS-1",
+	"description": "Remote output",
+	"disabled": false,
+	"dpmsStatus": true,
+	"width": 1920,
+	"height": 1080,
+	"refreshRate": 60,
+	"scale": 1,
+	"transform": 0,
+	"x": 1920,
+	"y": 0,
+	"mirrorOf": -1
+}]' <<< "$monitors_three")"
+select_outputs "$virtual_only"
+assert_eq "" "$EXTERNAL_OUTPUT" "does not offer a headless output as a projector"
+assert_eq 1 "$(active_output_count "$virtual_only")" "does not count a headless output as a visible fallback"
 
 mirrored_pair="$(jq -c '.[0:2]' <<< "$monitors_three")"
 output_is_mirroring "$mirrored_pair" HDMI-A-1 eDP-1 || fail "recognizes Hyprland's numeric mirror id"
@@ -86,7 +114,22 @@ safe_recover "test recovery" || fail "recovery accepts the replacement laptop pa
 assert_eq eDP-2 "$(state_field builtin)" "recovery forgets a laptop output that no longer exists"
 
 layout_log="$test_root/layouts.log"
-TEST_MONITORS="$monitors_three"
+monitors_with_headless="$(jq -c '. + [{
+	"id": 8,
+	"name": "HEADLESS-1",
+	"description": "Remote output",
+	"disabled": false,
+	"dpmsStatus": true,
+	"width": 1920,
+	"height": 1080,
+	"refreshRate": 60,
+	"scale": 1,
+	"transform": 0,
+	"x": 6400,
+	"y": 0,
+	"mirrorOf": -1
+}]' <<< "$monitors_three")"
+TEST_MONITORS="$monitors_with_headless"
 prepare_both_outputs() { return 0; }
 wait_for_output() { return 0; }
 wait_for_no_other_external() { return 0; }
@@ -98,19 +141,21 @@ run_layout() {
 
 BUILTIN_OUTPUT=eDP-1
 EXTERNAL_OUTPUT=HDMI-A-1
-apply_duplicate "$monitors_three" || fail "duplicate layout applies in the harness"
+apply_duplicate "$monitors_with_headless" || fail "duplicate layout applies in the harness"
 layout="$(<"$layout_log")"
 assert_contains "$layout" 'output = "eDP-1"' "duplicate keeps an explicit laptop rule"
 assert_contains "$layout" 'output = "DP-2", disabled = true' "duplicate turns off unrelated external displays"
+assert_not_contains "$layout" 'output = "HEADLESS-1"' "duplicate leaves headless outputs alone"
 
-apply_extended "$monitors_three" right || fail "extended layout applies in the harness"
+apply_extended "$monitors_with_headless" right || fail "extended layout applies in the harness"
 layout="$(<"$layout_log")"
 assert_contains "$layout" 'output = "DP-2", disabled = true' "extend turns off unrelated external displays"
 
 active_external_count() { printf '0\n'; }
-apply_builtin_only "$monitors_three" || fail "laptop-only layout applies in the harness"
+apply_builtin_only "$monitors_with_headless" || fail "laptop-only layout applies in the harness"
 layout="$(<"$layout_log")"
 assert_contains "$layout" 'output = "eDP-1", mode = "preferred", position = "0x0"' "laptop-only keeps its enable rule in the final layout"
+assert_not_contains "$layout" 'output = "HEADLESS-1"' "laptop-only leaves headless outputs alone"
 
 if main apply >/dev/null 2>&1; then
 	fail "apply without a mode should fail"

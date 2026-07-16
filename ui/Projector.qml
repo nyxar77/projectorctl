@@ -223,7 +223,7 @@ Scope {
 		if (selected)
 			return selected;
 		for (let index = 0; index < outputs.length; index++) {
-			if (outputs[index] && outputs[index].internal !== true)
+			if (outputs[index] && outputs[index].projector === true)
 				return outputs[index];
 		}
 		return null;
