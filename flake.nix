@@ -47,6 +47,19 @@
             exec quickshell -p ${./ui/Projector.qml} "$@"
           '';
         };
+
+        checks.controller = pkgs.runCommand "projectorctl-controller-check" {
+          nativeBuildInputs = [
+            pkgs.bash
+            pkgs.coreutils
+            pkgs.jq
+            pkgs.shellcheck
+          ];
+        } ''
+          shellcheck -x ${./src/projectorctl.sh} ${./tests/controller.bash}
+          PROJECTORCTL_SOURCE=${./src/projectorctl.sh} bash ${./tests/controller.bash}
+          touch "$out"
+        '';
       };
 
       flake.homeManagerModules.default = import ./modules/home-manager.nix;

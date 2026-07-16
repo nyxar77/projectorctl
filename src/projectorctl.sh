@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 set -Eeuo pipefail
 
 runtime_root="${PROJECTORCTL_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp}/projector-control-${UID}}"
@@ -154,6 +155,12 @@ output_is_configured() {
 	[[ -n "$output" ]] && jq -e --arg output "$output" 'any(.[]; .name == $output and (.disabled // false) == false)' <<< "$monitors" >/dev/null
 }
 
+output_exists() {
+	local monitors="$1"
+	local output="$2"
+	[[ -n "$output" ]] && jq -e --arg output "$output" 'any(.[]; .name == $output)' <<< "$monitors" >/dev/null
+}
+
 active_output_count() {
 	local monitors="$1"
 	jq -r '[.[] | select((.disabled // false) == false and (.dpmsStatus // true) == true)] | length' <<< "$monitors"
@@ -194,7 +201,7 @@ output_is_mirroring() {
 				.name == $mirror
 				and (.disabled // false) == false
 				and (.dpmsStatus // true) == true
-				and ((.mirrorOf // "") == $source or (.mirrorOf // "") == $sourceId)
+				and (((.mirrorOf // "") | tostring) == $source or ((.mirrorOf // "") | tostring) == $sourceId)
 			)
 		' <<< "$monitors" >/dev/null
 }
@@ -233,10 +240,12 @@ mirror_rule() {
 	local output="$2"
 	local source="$3"
 	local scale=""
+	local transform=""
 
 	scale="$(monitor_scale "$monitors" "$output")"
-	printf '{ output = %s, mode = "preferred", scale = %s, mirror = %s }' \
-		"$(lua_quote "$output")" "$scale" "$(lua_quote "$source")"
+	transform="$(monitor_transform "$monitors" "$output")"
+	printf '{ output = %s, mode = "preferred", scale = %s, transform = %s, disabled = false, mirror = %s }' \
+		"$(lua_quote "$output")" "$scale" "$transform" "$(lua_quote "$source")"
 }
 
 disable_rule() {
@@ -401,6 +410,40 @@ wait_for_no_other_external() {
 	return 1
 }
 
+extended_layout_matches() {
+	local monitors="$1"
+	local direction="$2"
+	local builtin_x=0
+	local external_x=0
+
+	output_is_active "$monitors" "$BUILTIN_OUTPUT" || return 1
+	output_is_active "$monitors" "$EXTERNAL_OUTPUT" || return 1
+	builtin_x="$(jq -r --arg output "$BUILTIN_OUTPUT" '[.[] | select(.name == $output)][0].x // 0' <<< "$monitors")"
+	external_x="$(jq -r --arg output "$EXTERNAL_OUTPUT" '[.[] | select(.name == $output)][0].x // 0' <<< "$monitors")"
+
+	if [[ "$direction" == "right" ]]; then
+		((external_x > builtin_x))
+	else
+		((external_x < builtin_x))
+	fi
+}
+
+wait_for_extended_layout() {
+	local direction="$1"
+	local current=""
+	local attempt=0
+
+	for ((attempt = 0; attempt < 30; attempt++)); do
+		if current="$(monitor_json)" && extended_layout_matches "$current" "$direction"; then
+			return 0
+		fi
+		sleep 0.1
+	done
+
+	LAST_ERROR="Hyprland did not place the projector on the $direction"
+	return 1
+}
+
 refresh_wallpaper() {
 	local wallpaper_file="${XDG_STATE_HOME:-$HOME/.local/state}/caelestia/wallpaper/path.txt"
 	local wallpaper=""
@@ -498,15 +541,19 @@ safe_recover() {
 	local script=""
 	local -a rules=()
 
+	monitors="$(monitor_json)" || return 1
 	if [[ -z "$builtin" ]]; then
 		builtin="$(state_field builtin)"
 	fi
-	monitors="$(monitor_json)" || return 1
+	if ! output_exists "$monitors" "$builtin"; then
+		builtin=""
+	fi
+	select_outputs "$monitors"
 	if [[ -z "$builtin" ]]; then
-		select_outputs "$monitors"
 		builtin="$BUILTIN_OUTPUT"
 	fi
 	[[ -n "$builtin" ]] || return 1
+	BUILTIN_OUTPUT="$builtin"
 
 	# Restore visible laptop output first. Do not wait on a removed projector.
 	if ! output_is_configured "$monitors" "$builtin"; then
@@ -521,6 +568,7 @@ safe_recover() {
 	focus_output "$builtin" || true
 	monitors="$(monitor_json)" || return 1
 	select_outputs "$monitors"
+	BUILTIN_OUTPUT="$builtin"
 	external="$EXTERNAL_OUTPUT"
 	if [[ -n "$external" ]] && output_is_active "$monitors" "$external"; then
 		rules+=("$(enable_rule "$monitors" "$builtin" "0x0")")
@@ -528,6 +576,9 @@ safe_recover() {
 		printf -v script '%s\n' "${rules[@]}"
 		run_layout "$script" || true
 	fi
+	monitors="$(monitor_json)" || return 1
+	select_outputs "$monitors"
+	BUILTIN_OUTPUT="$builtin"
 	if (( $(active_external_count "$monitors") > 0 )); then
 		write_state extend-right "$builtin" "$EXTERNAL_OUTPUT" "$reason" warning
 	else
@@ -556,6 +607,7 @@ apply_builtin_only() {
 		return 1
 	}
 	mapfile -t external_outputs < <(jq -r --arg pattern "$internal_pattern" '.[] | select((.name | test($pattern; "i")) | not) | .name' <<< "$monitors")
+	rules+=("$(enable_rule "$monitors" "$BUILTIN_OUTPUT" "0x0")")
 	for output in "${external_outputs[@]}"; do
 		rules+=("$(disable_rule "$output")")
 	done
@@ -607,7 +659,9 @@ apply_extended() {
 	local direction="$2"
 	local current=""
 	local script=""
+	local output=""
 	local -a rules=()
+	local -a other_outputs=()
 
 	prepare_both_outputs "$monitors" || return 1
 	current="$(monitor_json)" || return 1
@@ -618,40 +672,49 @@ apply_extended() {
 		rules+=("$(enable_rule "$current" "$EXTERNAL_OUTPUT" "0x0")")
 		rules+=("$(enable_rule "$current" "$BUILTIN_OUTPUT" "auto-right")")
 	fi
+	mapfile -t other_outputs < <(jq -r --arg pattern "$internal_pattern" --arg selected "$EXTERNAL_OUTPUT" '
+		.[] | select(((.name | test($pattern; "i")) | not) and .name != $selected) | .name
+	' <<< "$current")
+	for output in "${other_outputs[@]}"; do
+		rules+=("$(disable_rule "$output")")
+	done
 	printf -v script '%s\n' "${rules[@]}"
 	run_layout "$script" || return 1
 	wait_for_output "$BUILTIN_OUTPUT" active || return 1
 	wait_for_output "$EXTERNAL_OUTPUT" active || return 1
+	wait_for_no_other_external "$EXTERNAL_OUTPUT" || return 1
+	wait_for_extended_layout "$direction" || return 1
 	write_state "extend-$direction" "$BUILTIN_OUTPUT" "$EXTERNAL_OUTPUT" "Desktop extended $direction" info
 }
 
 apply_duplicate() {
 	local monitors="$1"
 	local current=""
-	local append_rule=""
 	local script=""
+	local output=""
 	local -a rules=()
+	local -a other_outputs=()
 
-	current="$monitors"
-	if ! output_is_configured "$current" "$BUILTIN_OUTPUT"; then
-		append_rule="$(enable_rule "$current" "$BUILTIN_OUTPUT" "0x0")"
-		run_layout "$append_rule" || return 1
-		wait_for_output "$BUILTIN_OUTPUT" configured || return 1
-	fi
-	wake_output "$BUILTIN_OUTPUT" || return 1
+	prepare_both_outputs "$monitors" || return 1
 	current="$(monitor_json)" || return 1
+	rules+=("$(enable_rule "$current" "$BUILTIN_OUTPUT" "0x0")")
 	rules+=("$(mirror_rule "$current" "$EXTERNAL_OUTPUT" "$BUILTIN_OUTPUT")")
+	mapfile -t other_outputs < <(jq -r --arg pattern "$internal_pattern" --arg selected "$EXTERNAL_OUTPUT" '
+		.[] | select(((.name | test($pattern; "i")) | not) and .name != $selected) | .name
+	' <<< "$current")
+	for output in "${other_outputs[@]}"; do
+		rules+=("$(disable_rule "$output")")
+	done
 	printf -v script '%s\n' "${rules[@]}"
 	run_layout "$script" || return 1
 	wait_for_output "$BUILTIN_OUTPUT" active || return 1
 	wait_for_output "$EXTERNAL_OUTPUT" active || return 1
-	if ! output_is_mirroring "$current" "$EXTERNAL_OUTPUT" "$BUILTIN_OUTPUT"; then
-		current="$(monitor_json)" || return 1
-		output_is_mirroring "$current" "$EXTERNAL_OUTPUT" "$BUILTIN_OUTPUT" || {
-			LAST_ERROR="Hyprland did not create a shared duplicate layout"
-			return 1
-		}
-	fi
+	wait_for_no_other_external "$EXTERNAL_OUTPUT" || return 1
+	current="$(monitor_json)" || return 1
+	output_is_mirroring "$current" "$EXTERNAL_OUTPUT" "$BUILTIN_OUTPUT" || {
+		LAST_ERROR="Hyprland did not create a shared duplicate layout"
+		return 1
+	}
 	write_state duplicate "$BUILTIN_OUTPUT" "$EXTERNAL_OUTPUT" "Shared duplicate layout is active" info
 }
 
@@ -705,13 +768,13 @@ status_json() {
 
 	if ((active_count == 0)); then
 		mode="none"
-	elif [[ "$builtin_active" == true && "$external_active" == true && "$mirror_active" == true ]]; then
+	elif [[ "$builtin_active" == true && "$external_active" == true && "$mirror_active" == true && "$external_count" -eq 1 ]]; then
 		mode="duplicate"
 	elif [[ "$builtin_active" == true && "$external_count" -eq 0 ]]; then
 		mode="builtin"
 	elif [[ "$builtin_active" == false && "$external_count" -gt 0 ]]; then
 		mode="external"
-	elif [[ "$builtin_active" == true && "$external_active" == true ]]; then
+	elif [[ "$builtin_active" == true && "$external_active" == true && "$external_count" -eq 1 ]]; then
 		builtin_x="$(jq -r --arg output "$BUILTIN_OUTPUT" '[.[] | select(.name == $output)][0].x // 0' <<< "$monitors")"
 		external_x="$(jq -r --arg output "$EXTERNAL_OUTPUT" '[.[] | select(.name == $output)][0].x // 0' <<< "$monitors")"
 		if ((external_x > builtin_x)); then
@@ -884,7 +947,9 @@ recover_if_needed_locked() {
 	requested="$(jq -r '.requestedMode // empty' <<< "$state")"
 	remembered_builtin="$(jq -r '.builtin // empty' <<< "$state")"
 	remembered_external="$(jq -r '.external // empty' <<< "$state")"
-	[[ -n "$remembered_builtin" ]] && BUILTIN_OUTPUT="$remembered_builtin"
+	if output_exists "$monitors" "$remembered_builtin"; then
+		BUILTIN_OUTPUT="$remembered_builtin"
+	fi
 	active_count="$(active_output_count "$monitors")"
 	output_is_active "$monitors" "$BUILTIN_OUTPUT" && builtin_active=true
 	output_is_active "$monitors" "$remembered_external" && target_active=true
@@ -966,7 +1031,8 @@ watch_guard() {
 
 	watch_events 8>&- &
 	event_pid="$!"
-	trap '[[ -n ${event_pid:-} ]] && kill "$event_pid" 2>/dev/null || true' EXIT INT TERM
+	trap '[[ -n ${event_pid:-} ]] && kill "$event_pid" 2>/dev/null || true' EXIT
+	trap 'exit 0' INT TERM
 
 	while true; do
 		guard_check
@@ -978,36 +1044,43 @@ usage() {
 	printf 'usage: projectorctl status | apply MODE | recover | check | watch\n' >&2
 }
 
-command="${1:-status}"
-case "$command" in
-	status)
-		status_json
-		;;
-	apply)
-		[[ $# -eq 2 ]] || {
-			usage
-			exit 2
-		}
-		apply_mode "$2"
-		;;
-	recover)
-		exec 9> "$operation_lock"
-		flock -w 8 9 || exit 1
-		if safe_recover "Laptop display restored manually"; then
+main() {
+	local command="${1:-status}"
+
+	case "$command" in
+		status)
 			status_json
-		else
-			emit_apply_error recover "Could not restore the laptop display" false
-			exit 1
-		fi
-		;;
-	check)
-		guard_check
-		;;
-	watch)
-		watch_guard
-		;;
-	*)
-		usage
-		exit 2
-		;;
-esac
+			;;
+		apply)
+			[[ $# -eq 2 ]] || {
+				usage
+				return 2
+			}
+			apply_mode "$2"
+			;;
+		recover)
+			exec 9> "$operation_lock"
+			flock -w 8 9 || return 1
+			if safe_recover "Laptop display restored manually"; then
+				status_json
+			else
+				emit_apply_error recover "Could not restore the laptop display" false
+				return 1
+			fi
+			;;
+		check)
+			guard_check
+			;;
+		watch)
+			watch_guard
+			;;
+		*)
+			usage
+			return 2
+			;;
+	esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+	main "$@"
+fi
