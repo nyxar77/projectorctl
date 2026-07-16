@@ -96,6 +96,15 @@ monitor_json() {
 	printf '%s\n' "$monitors"
 }
 
+active_monitor_json() {
+	local monitors=""
+
+	resolve_instance || return 1
+	monitors="$(timeout 3 "$hyprctl_bin" -j monitors 2>/dev/null)" || return 1
+	jq -e 'type == "array"' <<< "$monitors" >/dev/null 2>&1 || return 1
+	printf '%s\n' "$monitors"
+}
+
 read_state() {
 	if [[ -r "$state_file" ]] && jq -e 'type == "object"' "$state_file" >/dev/null 2>&1; then
 		jq -c . "$state_file"
@@ -984,8 +993,28 @@ apply_mode() {
 	apply_mode_locked "$mode"
 }
 
+guard_recover() {
+	local reason="$1"
+	local attempt=0
+
+	for ((attempt = 0; attempt < 8; attempt++)); do
+		LAST_ERROR=""
+		if safe_recover "$reason"; then
+			printf 'projectorctl: %s\n' "$reason" >&2
+			return 0
+		fi
+		sleep 0.25
+	done
+
+	printf 'projectorctl: recovery failed: %s%s\n' \
+		"$reason" "${LAST_ERROR:+ ($LAST_ERROR)}" >&2
+	return 1
+}
+
 recover_if_needed_locked() {
+	local removed_output="${1:-}"
 	local monitors=""
+	local active_monitors=""
 	local state=""
 	local requested=""
 	local remembered_builtin=""
@@ -994,27 +1023,42 @@ recover_if_needed_locked() {
 	local builtin_active=false
 	local target_active=false
 
-	monitors="$(monitor_json)" || return 0
-	select_outputs "$monitors"
 	state="$(read_state)"
 	requested="$(jq -r '.requestedMode // empty' <<< "$state")"
 	remembered_builtin="$(jq -r '.builtin // empty' <<< "$state")"
 	remembered_external="$(jq -r '.external // empty' <<< "$state")"
+
+	if [[ -n "$removed_output" && "$removed_output" == "$remembered_external" ]]; then
+		case "$requested" in
+			external)
+				guard_recover "Projector disconnected; the laptop panel was restored" || true
+				return 0
+				;;
+			duplicate)
+				guard_recover "Mirror disconnected; the laptop panel was kept available" || true
+				return 0
+				;;
+		esac
+	fi
+
+	monitors="$(monitor_json)" || return 0
+	active_monitors="$(active_monitor_json)" || active_monitors="$monitors"
+	select_outputs "$monitors"
 	if output_exists "$monitors" "$remembered_builtin"; then
 		BUILTIN_OUTPUT="$remembered_builtin"
 	fi
-	active_count="$(active_output_count "$monitors")"
-	output_is_active "$monitors" "$BUILTIN_OUTPUT" && builtin_active=true
-	output_is_active "$monitors" "$remembered_external" && target_active=true
+	active_count="$(active_output_count "$active_monitors")"
+	output_is_active "$active_monitors" "$BUILTIN_OUTPUT" && builtin_active=true
+	output_is_active "$active_monitors" "$remembered_external" && target_active=true
 
 	if ((active_count == 0)); then
-		safe_recover "All displays went offline; the laptop panel was restored" || true
+		guard_recover "All displays went offline; the laptop panel was restored" || true
 		return 0
 	fi
 
 	if [[ "$requested" == "external" && "$target_active" == false ]]; then
 		if [[ "$builtin_active" == false ]]; then
-			safe_recover "Projector disconnected; the laptop panel was restored" || true
+			guard_recover "Projector disconnected; the laptop panel was restored" || true
 		else
 			write_state builtin "$BUILTIN_OUTPUT" "" "Projector disconnected; laptop display stayed active" warning
 			notify_recovery "Projector disconnected; laptop display stayed active"
@@ -1029,28 +1073,42 @@ recover_if_needed_locked() {
 			return 0
 		fi
 		if [[ "$builtin_active" == false ]]; then
-			safe_recover "Duplicate source disappeared; the laptop panel was restored" || true
+			guard_recover "Duplicate source disappeared; the laptop panel was restored" || true
 			return 0
 		fi
 		if ! output_is_mirroring "$monitors" "$remembered_external" "$BUILTIN_OUTPUT"; then
 			if ! apply_duplicate "$monitors"; then
-				safe_recover "Duplicate layout failed; the laptop panel was restored" || true
+				guard_recover "Duplicate layout failed; the laptop panel was restored" || true
 			fi
 		fi
 	fi
 }
 
 guard_check() {
+	local removed_output="${1:-}"
+
 	(
 		exec 9> "$operation_lock"
 		flock -n 9 || exit 0
-		recover_if_needed_locked
+		recover_if_needed_locked "$removed_output"
 	)
+}
+
+removed_output_from_event() {
+	local event="$1"
+	local payload="${event#*>>}"
+
+	if [[ "$event" == monitorremovedv2* ]]; then
+		payload="${payload#*,}"
+		payload="${payload%%,*}"
+	fi
+	printf '%s\n' "$payload"
 }
 
 watch_events() {
 	local socket=""
 	local event=""
+	local removed_output=""
 
 	while true; do
 		if ! resolve_instance; then
@@ -1065,8 +1123,13 @@ watch_events() {
 
 		while IFS= read -r event; do
 			case "$event" in
-				monitorremoved*|monitoradded*|configreloaded*)
-					sleep 0.15
+				monitorremoved*)
+					removed_output="$(removed_output_from_event "$event")"
+					sleep 0.05
+					guard_check "$removed_output"
+					;;
+				monitoradded*|configreloaded*)
+					sleep 0.1
 					guard_check
 					[[ "$event" == monitoradded* ]] && refresh_wallpaper || true
 					;;

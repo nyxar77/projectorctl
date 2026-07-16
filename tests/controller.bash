@@ -175,6 +175,32 @@ CHOSEN_INSTANCE=""
 resolve_instance
 assert_eq newer "$CHOSEN_INSTANCE" "falls back to the newest live Hyprland instance"
 
+assert_eq HDMI-A-1 "$(removed_output_from_event 'monitorremoved>>HDMI-A-1')" "reads the removed output from Hyprland events"
+assert_eq HDMI-A-1 "$(removed_output_from_event 'monitorremovedv2>>1,HDMI-A-1,LG TV')" "reads the removed output from v2 events"
+
+forced_recovery_log="$test_root/forced-recovery.log"
+(
+	write_state external eDP-1 HDMI-A-1 "" info
+	# shellcheck disable=SC2329
+	safe_recover() { printf '%s\n' "$1" > "$forced_recovery_log"; }
+	recover_if_needed_locked HDMI-A-1 2>/dev/null
+)
+assert_contains "$(<"$forced_recovery_log")" "Projector disconnected" "a removal event forces projector-only recovery"
+
+poll_recovery_log="$test_root/poll-recovery.log"
+(
+	write_state external eDP-1 HDMI-A-1 "" info
+	TEST_MONITORS="$monitors_three"
+	# shellcheck disable=SC2329
+	monitor_json() { printf '%s\n' "$TEST_MONITORS"; }
+	# shellcheck disable=SC2329
+	active_monitor_json() { printf '[]\n'; }
+	# shellcheck disable=SC2329
+	safe_recover() { printf '%s\n' "$1" > "$poll_recovery_log"; }
+	recover_if_needed_locked 2>/dev/null
+)
+assert_contains "$(<"$poll_recovery_log")" "All displays went offline" "the watchdog uses active monitors instead of stale monitor records"
+
 if main apply >/dev/null 2>&1; then
 	fail "apply without a mode should fail"
 else
