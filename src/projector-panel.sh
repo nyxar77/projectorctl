@@ -35,6 +35,24 @@ remove_own_pid() {
 	fi
 }
 
+stop_own_panel() {
+	trap - INT TERM HUP
+
+	if [[ -n "${panel_pid:-}" ]] && kill -0 "$panel_pid" 2>/dev/null; then
+		kill "$panel_pid" 2>/dev/null || true
+		for _ in {1..20}; do
+			kill -0 "$panel_pid" 2>/dev/null || break
+			sleep 0.05
+		done
+		if kill -0 "$panel_pid" 2>/dev/null; then
+			kill -KILL "$panel_pid" 2>/dev/null || true
+		fi
+		wait "$panel_pid" 2>/dev/null || true
+	fi
+
+	exit 0
+}
+
 exec 9> "$lock_file"
 flock -w 2 9 || {
 	printf 'projector-panel: another panel action is still running\n' >&2
@@ -63,5 +81,5 @@ printf '%s\n' "$panel_pid" > "$pid_file"
 flock -u 9
 
 trap remove_own_pid EXIT
-trap 'exit 0' INT TERM
+trap stop_own_panel INT TERM HUP
 wait "$panel_pid"
