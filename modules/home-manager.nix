@@ -34,14 +34,18 @@ in {
     wayland.windowManager.hyprland.extraConfig = lib.mkAfter (builtins.readFile ./projector-layout.lua);
 
     systemd.user.services.projector-display-guard = lib.mkIf cfg.enableGuard {
-      Unit.Description = "Projector display fail-safe";
+      Unit = {
+        Description = "Projector display fail-safe";
+        After = [ "graphical-session.target" ];
+        PartOf = [ "graphical-session.target" ];
+      };
       Service = {
         ExecStart = "${controller}/bin/projectorctl watch";
         ExecStopPost = "-${controller}/bin/projectorctl check";
         Restart = "always";
         RestartSec = 1;
       };
-      Install.WantedBy = [ "default.target" ];
+      Install.WantedBy = [ "graphical-session.target" ];
     };
   };
 }
