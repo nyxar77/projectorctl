@@ -3,7 +3,7 @@ let
   cfg = config.programs.projectorctl;
   controller = pkgs.writeShellApplication {
     name = "projectorctl";
-    runtimeInputs = [ pkgs.coreutils pkgs.jq pkgs.libnotify pkgs.socat pkgs.util-linux ];
+    runtimeInputs = [ pkgs.coreutils pkgs.jq pkgs.libnotify pkgs.socat pkgs.systemd pkgs.util-linux ];
     text = builtins.readFile ../src/projectorctl.sh;
   };
   panel = pkgs.writeShellApplication {

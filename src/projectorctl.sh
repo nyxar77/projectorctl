@@ -12,6 +12,8 @@ guard_lock="$runtime_root/guard.lock"
 hyprctl_bin="${PROJECTORCTL_HYPRCTL:-hyprctl}"
 caelestia_bin="${PROJECTORCTL_CAELESTIA:-caelestia}"
 notify_bin="${PROJECTORCTL_NOTIFY_SEND:-notify-send}"
+udevadm_bin="${PROJECTORCTL_UDEVADM:-udevadm}"
+guard_poll_interval="${PROJECTORCTL_GUARD_POLL_INTERVAL:-60}"
 
 internal_pattern='^(eDP|LVDS|DSI)(-|$)'
 ignored_output_pattern='^(HEADLESS|FALLBACK)(-|$)'
@@ -1067,6 +1069,12 @@ recover_if_needed_locked() {
 
 	state="$(read_state)"
 	requested="$(jq -r '.requestedMode // empty' <<< "$state")"
+
+	case "$requested" in
+		external|duplicate) ;;
+		*) return 0 ;;
+	esac
+
 	remembered_builtin="$(jq -r '.builtin // empty' <<< "$state")"
 	remembered_external="$(jq -r '.external // empty' <<< "$state")"
 
@@ -1144,7 +1152,7 @@ guard_check() {
 
 	(
 		exec 9> "$operation_lock"
-		flock -n 9 || exit 0
+		flock -w 5 9 || exit 0
 		recover_if_needed_locked "$removed_output"
 	)
 }
@@ -1194,20 +1202,40 @@ watch_events() {
 	done
 }
 
+handle_drm_event() {
+	case "$1" in
+		KERNEL*) guard_check ;;
+	esac
+}
+
+watch_drm_events() {
+	local event=""
+
+	while true; do
+		while IFS= read -r event; do
+			handle_drm_event "$event"
+		done < <("$udevadm_bin" monitor --kernel --subsystem-match=drm 2>/dev/null || true)
+		sleep 1
+	done
+}
+
 watch_guard() {
-	local event_pid=""
+	local hypr_event_pid=""
+	local drm_event_pid=""
 
 	exec 8> "$guard_lock"
 	flock -n 8 || return 0
 
 	watch_events 8>&- &
-	event_pid="$!"
-	trap '[[ -n ${event_pid:-} ]] && kill "$event_pid" 2>/dev/null || true' EXIT
+	hypr_event_pid="$!"
+	watch_drm_events 8>&- &
+	drm_event_pid="$!"
+	trap '[[ -n ${hypr_event_pid:-} ]] && kill "$hypr_event_pid" 2>/dev/null || true; [[ -n ${drm_event_pid:-} ]] && kill "$drm_event_pid" 2>/dev/null || true' EXIT
 	trap 'exit 0' INT TERM
 
 	while true; do
 		guard_check
-		sleep 2
+		sleep "$guard_poll_interval"
 	done
 }
 

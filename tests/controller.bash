@@ -226,6 +226,25 @@ set_output_dpms eDP-1 off
 assert_contains "$(<"$dpms_log")" 'action = "enable"' "waking a display uses Hyprland's current DPMS action"
 assert_contains "$(<"$dpms_log")" 'action = "disable"' "sleeping a display uses Hyprland's current DPMS action"
 
+idle_check_log="$test_root/idle-check.log"
+(
+	write_state builtin eDP-1 HDMI-A-1 "" info
+	# shellcheck disable=SC2329
+	monitor_json() { printf 'called\n' > "$idle_check_log"; return 1; }
+	recover_if_needed_locked
+)
+[[ ! -e "$idle_check_log" ]] || fail "an idle guard check queried Hyprland"
+pass "the guard leaves Hyprland alone when no fail-safe is armed"
+
+drm_event_log="$test_root/drm-event.log"
+(
+	# shellcheck disable=SC2329
+	guard_check() { printf 'checked\n' >> "$drm_event_log"; }
+	handle_drm_event "monitor will print the received events"
+	handle_drm_event "KERNEL[10.0] change /devices/pci/drm/card1 (drm)"
+)
+assert_eq checked "$(<"$drm_event_log")" "a kernel DRM event runs the guard"
+
 if main apply >/dev/null 2>&1; then
 	fail "apply without a mode should fail"
 else
