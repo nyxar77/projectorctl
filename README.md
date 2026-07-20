@@ -1,34 +1,67 @@
 # projectorctl
 
-Safe display switching for Hyprland laptops and projectors.
+A small display switcher for Hyprland laptops. It covers the usual projector setup without an `xrandr` script or a streamed virtual display.
 
-`projectorctl` provides laptop-only, projector-only, native mirroring, and extended layouts. It verifies every layout, uses Hyprland's own mirroring instead of a streamed virtual output, and restores the laptop panel if a projector-only setup is unplugged.
+The available layouts are:
+
+- laptop only
+- projector only
+- mirror
+- extend left
+- extend right
+
+Mirror mode uses Hyprland's own monitor mirroring. Projector-only mode keeps a guard running so the laptop screen comes back if the cable is pulled.
 
 ## Home Manager
 
+Add the flake and import its module:
+
 ```nix
-inputs.projectorctl.url = "path:/path/to/projectorctl";
+inputs.projectorctl.url = "github:nyxar77/projectorctl";
 
 imports = [ inputs.projectorctl.homeManagerModules.default ];
 
-programs.projectorctl = {
-  enable = true;
-  enablePanel = true;
-  enableGuard = true;
-};
+programs.projectorctl.enable = true;
 ```
 
-Bind `projector-panel` to a key in Hyprland, or use the CLI directly. The panel appears above every active display without belonging to a workspace; press the same key again to close it everywhere.
+The panel and unplug guard are enabled by default. They can be turned off with `enablePanel` and `enableGuard`.
+
+This project uses Hyprland's Lua configuration. Bind the panel wherever it makes sense in your config:
+
+```lua
+hl.bind("SUPER + P", hl.dsp.exec_cmd("projector-panel"))
+```
+
+The panel opens on every active screen and does not belong to a workspace. Run the same command again to close it.
+
+## CLI
+
+The panel is optional. Everything is available directly:
 
 ```sh
 projectorctl status
-projectorctl apply duplicate
+projectorctl apply builtin
 projectorctl apply external
+projectorctl apply duplicate
+projectorctl apply extend-left
+projectorctl apply extend-right
 projectorctl recover
 ```
 
-If every display is black, press `Ctrl+Alt+F12` to restore the laptop panel directly. This emergency binding is installed by the Home Manager module and does not open the graphical panel.
+`external` means projector only. `recover` brings the laptop panel back.
 
-The fail-safe listens for Hyprland and kernel DRM hotplug events. A slow 60-second check remains as a backup; it does not query Hyprland unless projector-only or mirror mode is armed.
+## If the screen stays black
 
-The module appends the required Lua layout loader to Hyprland's configuration. The panel follows Caelestia's scheme file when it is present and otherwise uses its built-in colors.
+Press `Ctrl+Alt+F12`. The Home Manager module installs this as a direct recovery binding, so it works without opening the panel.
+
+The guard listens to Hyprland and kernel DRM hotplug events. There is also a slow 60-second check as a fallback, but it stays out of Hyprland when no guarded layout is active.
+
+## Theme
+
+The panel uses the current Caelestia scheme when one is available. Otherwise it uses its own small fallback palette.
+
+## Check the repo
+
+```sh
+nix flake check
+```
