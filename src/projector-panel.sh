@@ -35,9 +35,9 @@ remove_own_pid() {
 	fi
 }
 
-stop_own_panel() {
-	trap - INT TERM HUP
-
+cleanup_own_panel() {
+	local result="$?"
+	trap - EXIT INT TERM HUP
 	if [[ -n "${panel_pid:-}" ]] && kill -0 "$panel_pid" 2>/dev/null; then
 		kill "$panel_pid" 2>/dev/null || true
 		for _ in {1..20}; do
@@ -49,8 +49,8 @@ stop_own_panel() {
 		fi
 		wait "$panel_pid" 2>/dev/null || true
 	fi
-
-	exit 0
+	remove_own_pid
+	exit "$result"
 }
 
 exec 9> "$lock_file"
@@ -75,11 +75,12 @@ if [[ -r "$pid_file" ]] && read -r old_pid < "$pid_file" && panel_is_live "$old_
 fi
 
 rm -f "$pid_file"
+panel_pid=""
+trap cleanup_own_panel EXIT
+trap 'exit 0' INT TERM HUP
 "$quickshell_bin" -p "$PROJECTORCTL_PANEL_QML" "$@" &
 panel_pid="$!"
 printf '%s\n' "$panel_pid" > "$pid_file"
 flock -u 9
 
-trap remove_own_pid EXIT
-trap stop_own_panel INT TERM HUP
 wait "$panel_pid"

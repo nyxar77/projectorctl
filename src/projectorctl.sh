@@ -8,18 +8,27 @@ state_file="$runtime_root/state.json"
 layout_file="${PROJECTORCTL_LAYOUT_FILE:-${HOME}/.cache/hypr/projector-layout.lua}"
 operation_lock="$runtime_root/operation.lock"
 guard_lock="$runtime_root/guard.lock"
+pending_guard_file="$runtime_root/recovery.pending"
+guard_event_fifo="$runtime_root/guard.events"
 
 hyprctl_bin="${PROJECTORCTL_HYPRCTL:-hyprctl}"
 caelestia_bin="${PROJECTORCTL_CAELESTIA:-caelestia}"
 notify_bin="${PROJECTORCTL_NOTIFY_SEND:-notify-send}"
 udevadm_bin="${PROJECTORCTL_UDEVADM:-udevadm}"
 guard_poll_interval="${PROJECTORCTL_GUARD_POLL_INTERVAL:-60}"
+monitor_timeout="${PROJECTORCTL_MONITOR_TIMEOUT:-3}"
+monitor_probe_timeout="${PROJECTORCTL_MONITOR_PROBE_TIMEOUT:-0.5}"
+verification_attempts="${PROJECTORCTL_VERIFICATION_ATTEMPTS:-10}"
+guard_retry_interval="${PROJECTORCTL_GUARD_RETRY_INTERVAL:-1}"
+guard_recovery_attempts="${PROJECTORCTL_GUARD_RECOVERY_ATTEMPTS:-2}"
+watcher_health_interval="${PROJECTORCTL_WATCHER_HEALTH_INTERVAL:-5}"
 
 internal_pattern='^(eDP|LVDS|DSI)(-|$)'
 ignored_output_pattern='^(HEADLESS|FALLBACK)(-|$)'
 BUILTIN_OUTPUT=""
 EXTERNAL_OUTPUT=""
 LAST_ERROR=""
+RECOVERY_NOTICE=""
 
 mkdir -p "$runtime_root"
 
@@ -91,19 +100,21 @@ resolve_instance() {
 }
 
 monitor_json() {
+	local query_timeout="${1:-$monitor_timeout}"
 	local monitors=""
 
 	resolve_instance || return 1
-	monitors="$(timeout 3 "$hyprctl_bin" -j monitors all 2>/dev/null)" || return 1
+	monitors="$(timeout "$query_timeout" "$hyprctl_bin" -j monitors all 2>/dev/null)" || return 1
 	jq -e 'type == "array"' <<< "$monitors" >/dev/null 2>&1 || return 1
 	printf '%s\n' "$monitors"
 }
 
 active_monitor_json() {
+	local query_timeout="${1:-$monitor_timeout}"
 	local monitors=""
 
 	resolve_instance || return 1
-	monitors="$(timeout 3 "$hyprctl_bin" -j monitors 2>/dev/null)" || return 1
+	monitors="$(timeout "$query_timeout" "$hyprctl_bin" -j monitors 2>/dev/null)" || return 1
 	jq -e 'type == "array"' <<< "$monitors" >/dev/null 2>&1 || return 1
 	printf '%s\n' "$monitors"
 }
@@ -136,8 +147,52 @@ write_state() {
 		--arg event "$event" \
 		--arg level "$level" \
 		--argjson updatedAt "$(date +%s)" \
-		'{requestedMode: $mode, builtin: $builtin, external: $external, lastEvent: $event, eventLevel: $level, updatedAt: $updatedAt}' \
+		--arg guardExternal "$([[ "$mode" == external || "$mode" == duplicate ]] && printf '%s' "$external")" \
+		'{
+			requestedMode: $mode,
+			builtin: $builtin,
+			external: $external,
+			guardExternal: $guardExternal,
+			phase: "committed",
+			targetMode: "",
+			lastEvent: $event,
+			eventLevel: $level,
+			updatedAt: $updatedAt
+		}' \
 		> "$temporary"
+	mv -f "$temporary" "$state_file"
+}
+
+write_transition() {
+	local target_mode="$1"
+	local builtin="$2"
+	local external="$3"
+	local event="${4:-Switching display layout}"
+	local state=""
+	local temporary="$state_file.tmp.$$"
+
+	state="$(read_state)"
+	jq -c \
+		--arg targetMode "$target_mode" \
+		--arg builtin "$builtin" \
+		--arg external "$external" \
+		--arg event "$event" \
+		--argjson updatedAt "$(date +%s)" \
+		'. + {
+			builtin: (if $builtin == "" then (.builtin // "") else $builtin end),
+			external: (if $external == "" then (.external // "") else $external end),
+			phase: "applying",
+			targetMode: $targetMode,
+			lastEvent: $event,
+			eventLevel: "info",
+			updatedAt: $updatedAt
+		}
+		| .guardExternal = (
+			if ((.requestedMode // "") == "external" or (.requestedMode // "") == "duplicate")
+			then (.guardExternal // .external // "")
+			else ""
+			end
+		)' <<< "$state" > "$temporary"
 	mv -f "$temporary" "$state_file"
 }
 
@@ -414,8 +469,8 @@ wait_for_output() {
 	local current=""
 	local attempt=0
 
-	for ((attempt = 0; attempt < 30; attempt++)); do
-		if current="$(monitor_json)"; then
+	for ((attempt = 0; attempt < verification_attempts; attempt++)); do
+		if current="$(monitor_json "$monitor_probe_timeout")"; then
 			if [[ "$expected" == "active" ]] && output_is_active "$current" "$output"; then
 				return 0
 			fi
@@ -484,8 +539,8 @@ wait_for_no_other_external() {
 	local current=""
 	local attempt=0
 
-	for ((attempt = 0; attempt < 30; attempt++)); do
-		if current="$(monitor_json)" && ! other_external_is_active "$current" "$selected"; then
+	for ((attempt = 0; attempt < verification_attempts; attempt++)); do
+		if current="$(monitor_json "$monitor_probe_timeout")" && ! other_external_is_active "$current" "$selected"; then
 			return 0
 		fi
 		sleep 0.1
@@ -518,8 +573,8 @@ wait_for_extended_layout() {
 	local current=""
 	local attempt=0
 
-	for ((attempt = 0; attempt < 30; attempt++)); do
-		if current="$(monitor_json)" && extended_layout_matches "$current" "$direction"; then
+	for ((attempt = 0; attempt < verification_attempts; attempt++)); do
+		if current="$(monitor_json "$monitor_probe_timeout")" && extended_layout_matches "$current" "$direction"; then
 			return 0
 		fi
 		sleep 0.1
@@ -543,7 +598,7 @@ refresh_wallpaper() {
 notify_recovery() {
 	local message="$1"
 	if command -v "$notify_bin" >/dev/null 2>&1; then
-		"$notify_bin" -u critical -a "Projector" "Laptop display restored" "$message" >/dev/null 2>&1 || true
+		timeout 3 "$notify_bin" -u critical -a "Projector" "Laptop display restored" "$message" >/dev/null 2>&1 || true
 	fi
 }
 
@@ -626,7 +681,10 @@ safe_recover() {
 	local script=""
 	local -a rules=()
 
-	monitors="$(monitor_json)" || return 1
+	monitors="$(monitor_json)" || {
+		LAST_ERROR="Hyprland is not reachable during recovery"
+		return 1
+	}
 	if [[ -z "$builtin" ]]; then
 		builtin="$(state_field builtin)"
 	fi
@@ -665,12 +723,10 @@ safe_recover() {
 	select_outputs "$monitors"
 	BUILTIN_OUTPUT="$builtin"
 	if (( $(active_external_count "$monitors") > 0 )); then
-		write_state extend-right "$builtin" "$EXTERNAL_OUTPUT" "$reason" warning
+		write_state extend-right "$builtin" "$EXTERNAL_OUTPUT" "$reason" warning || return 1
 	else
-		write_state builtin "$builtin" "" "$reason" warning
+		write_state builtin "$builtin" "" "$reason" warning || return 1
 	fi
-	refresh_wallpaper || true
-	notify_recovery "$reason"
 }
 
 apply_builtin_only() {
@@ -681,7 +737,6 @@ apply_builtin_only() {
 	local -a rules=()
 	local -a external_outputs=()
 
-	write_state builtin "$BUILTIN_OUTPUT" "$EXTERNAL_OUTPUT" "Switching to laptop only" info
 	rule="$(enable_rule "$monitors" "$BUILTIN_OUTPUT" "0x0")"
 	run_layout "$rule" || return 1
 	wait_for_output "$BUILTIN_OUTPUT" configured || return 1
@@ -742,7 +797,7 @@ apply_external_only() {
 	wait_for_output "$EXTERNAL_OUTPUT" active || return 1
 	wait_for_no_other_external "$EXTERNAL_OUTPUT" || return 1
 	move_workspaces_to_output "$BUILTIN_OUTPUT" "$EXTERNAL_OUTPUT" || return 1
-	write_state external "$BUILTIN_OUTPUT" "$EXTERNAL_OUTPUT" "Laptop fallback is armed" info
+	write_state external "$BUILTIN_OUTPUT" "$EXTERNAL_OUTPUT" "Laptop fallback is armed" info || return 1
 	sleep_output "$BUILTIN_OUTPUT" || return 1
 	wait_for_output "$EXTERNAL_OUTPUT" active || return 1
 	write_state external "$BUILTIN_OUTPUT" "$EXTERNAL_OUTPUT" "Projector only; laptop fallback is armed" info
@@ -854,7 +909,7 @@ status_json() {
 
 	if ! monitors="$(monitor_json)"; then
 		jq -cn '{ok: false, mode: "unavailable", modeLabel: "Display service unavailable", health: "error", message: "Hyprland is not reachable", externalAvailable: false, activeCount: 0, outputs: []}'
-		return 0
+		return 1
 	fi
 
 	select_outputs "$monitors"
@@ -974,8 +1029,24 @@ emit_apply_success() {
 	local action="$1"
 	local result=""
 
-	result="$(status_json)"
-	jq -c --arg action "$action" '. + {result: "success", action: $action}' <<< "$result"
+	if result="$(status_json)"; then
+		jq -c --arg action "$action" '. + {result: "success", action: $action}' <<< "$result"
+	else
+		jq -cn \
+			--arg action "$action" \
+			--arg modeLabel "$(mode_label "$action")" \
+			'{
+				ok: true,
+				result: "success",
+				action: $action,
+				mode: $action,
+				modeLabel: $modeLabel,
+				health: "warning",
+				message: "Layout applied, but the final status check was unavailable",
+				externalAvailable: ($action != "builtin"),
+				outputs: []
+			}'
+	fi
 }
 
 apply_mode_locked() {
@@ -999,18 +1070,25 @@ apply_mode_locked() {
 		emit_apply_error "$mode" "No projector or external display is connected" false
 		return 1
 	fi
+	case "$mode" in
+		builtin|external|duplicate|extend-right|extend-left) ;;
+		*)
+			emit_apply_error "$mode" "Unknown projector mode" false
+			return 2
+			;;
+	esac
 
 	LAST_ERROR=""
+	if ! write_transition "$mode" "$BUILTIN_OUTPUT" "$EXTERNAL_OUTPUT" "Switching to $(mode_label "$mode")"; then
+		emit_apply_error "$mode" "Could not record the display transaction" false
+		return 1
+	fi
 	case "$mode" in
 		builtin) apply_builtin_only "$monitors" && applied=true ;;
 		external) apply_external_only "$monitors" && applied=true ;;
 		duplicate) apply_duplicate "$monitors" && applied=true ;;
 		extend-right) apply_extended "$monitors" right && applied=true ;;
 		extend-left) apply_extended "$monitors" left && applied=true ;;
-		*)
-			emit_apply_error "$mode" "Unknown projector mode" false
-			return 2
-			;;
 	esac
 
 	if [[ "$applied" == false ]]; then
@@ -1023,27 +1101,42 @@ apply_mode_locked() {
 		return 1
 	fi
 
-	refresh_wallpaper || true
 	emit_apply_success "$mode"
 }
 
 apply_mode() {
 	local mode="$1"
+	local result=0
+
 	exec 9> "$operation_lock"
 	if ! flock -w 8 9; then
 		emit_apply_error "$mode" "Another display change is still running" false
 		return 1
 	fi
-	apply_mode_locked "$mode"
+	if apply_mode_locked "$mode"; then
+		result=0
+	else
+		result=$?
+	fi
+	flock -u 9
+
+	if [[ -e "$pending_guard_file" ]]; then
+		guard_check || true
+	fi
+	if ((result == 0)); then
+		refresh_wallpaper || true
+	fi
+	return "$result"
 }
 
 guard_recover() {
 	local reason="$1"
 	local attempt=0
 
-	for ((attempt = 0; attempt < 8; attempt++)); do
+	for ((attempt = 0; attempt < guard_recovery_attempts; attempt++)); do
 		LAST_ERROR=""
 		if safe_recover "$reason"; then
+			RECOVERY_NOTICE="$reason"
 			printf 'projectorctl: %s\n' "$reason" >&2
 			return 0
 		fi
@@ -1076,17 +1169,17 @@ recover_if_needed_locked() {
 	esac
 
 	remembered_builtin="$(jq -r '.builtin // empty' <<< "$state")"
-	remembered_external="$(jq -r '.external // empty' <<< "$state")"
+	remembered_external="$(jq -r '.guardExternal // .external // empty' <<< "$state")"
 
 	if [[ -n "$remembered_external" ]] && drm_connector_is_disconnected "$remembered_external"; then
 		case "$requested" in
 			external)
-				guard_recover "Kernel reported the projector disconnected; the laptop panel was restored" || true
-				return 0
+				guard_recover "Kernel reported the projector disconnected; the laptop panel was restored"
+				return $?
 				;;
 			duplicate)
-				guard_recover "Kernel reported the mirror disconnected; the laptop panel was kept available" || true
-				return 0
+				guard_recover "Kernel reported the mirror disconnected; the laptop panel was kept available"
+				return $?
 				;;
 		esac
 	fi
@@ -1094,17 +1187,17 @@ recover_if_needed_locked() {
 	if [[ -n "$removed_output" && "$removed_output" == "$remembered_external" ]]; then
 		case "$requested" in
 			external)
-				guard_recover "Projector disconnected; the laptop panel was restored" || true
-				return 0
+				guard_recover "Projector disconnected; the laptop panel was restored"
+				return $?
 				;;
 			duplicate)
-				guard_recover "Mirror disconnected; the laptop panel was kept available" || true
-				return 0
+				guard_recover "Mirror disconnected; the laptop panel was kept available"
+				return $?
 				;;
 		esac
 	fi
 
-	monitors="$(monitor_json)" || return 0
+	monitors="$(monitor_json)" || return 1
 	active_monitors="$(active_monitor_json)" || active_monitors="$monitors"
 	select_outputs "$monitors"
 	if output_exists "$monitors" "$remembered_builtin"; then
@@ -1115,45 +1208,95 @@ recover_if_needed_locked() {
 	output_is_active "$active_monitors" "$remembered_external" && target_active=true
 
 	if ((active_count == 0)); then
-		guard_recover "All displays went offline; the laptop panel was restored" || true
-		return 0
+		guard_recover "All displays went offline; the laptop panel was restored"
+		return $?
 	fi
 
 	if [[ "$requested" == "external" && "$target_active" == false ]]; then
 		if [[ "$builtin_active" == false ]]; then
-			guard_recover "Projector disconnected; the laptop panel was restored" || true
+			guard_recover "Projector disconnected; the laptop panel was restored" || return 1
 		else
-			write_state builtin "$BUILTIN_OUTPUT" "" "Projector disconnected; laptop display stayed active" warning
-			notify_recovery "Projector disconnected; laptop display stayed active"
+			write_state builtin "$BUILTIN_OUTPUT" "" "Projector disconnected; laptop display stayed active" warning || return 1
+			RECOVERY_NOTICE="Projector disconnected; laptop display stayed active"
 		fi
 		return 0
 	fi
 
 	if [[ "$requested" == "duplicate" ]]; then
 		if [[ "$target_active" == false ]]; then
-			write_state builtin "$BUILTIN_OUTPUT" "" "Projector disconnected; laptop display stayed active" warning
-			refresh_wallpaper || true
+			write_state builtin "$BUILTIN_OUTPUT" "" "Projector disconnected; laptop display stayed active" warning || return 1
+			RECOVERY_NOTICE="Projector disconnected; laptop display stayed active"
 			return 0
 		fi
 		if [[ "$builtin_active" == false ]]; then
-			guard_recover "Duplicate source disappeared; the laptop panel was restored" || true
-			return 0
+			guard_recover "Duplicate source disappeared; the laptop panel was restored"
+			return $?
 		fi
 		if ! output_is_mirroring "$monitors" "$remembered_external" "$BUILTIN_OUTPUT"; then
 			if ! apply_duplicate "$monitors"; then
-				guard_recover "Duplicate layout failed; the laptop panel was restored" || true
+				guard_recover "Duplicate layout failed; the laptop panel was restored" || return 1
 			fi
 		fi
 	fi
 }
 
+queue_guard_check() {
+	local removed_output="${1:-*}"
+	local existing=""
+	local guarded_output=""
+	local temporary="$pending_guard_file.tmp.$BASHPID"
+
+	if [[ -r "$pending_guard_file" ]]; then
+		read -r existing < "$pending_guard_file" || existing=""
+		guarded_output="$(state_field guardExternal)"
+		if [[ -n "$existing" && "$existing" != "*" ]]; then
+			[[ "$existing" == "$guarded_output" ]] && return 0
+			[[ "$removed_output" != "$guarded_output" ]] && return 0
+		fi
+	fi
+	printf '%s\n' "$removed_output" > "$temporary"
+	mv -f "$temporary" "$pending_guard_file"
+}
+
+take_pending_guard() {
+	local processing="$pending_guard_file.processing.$BASHPID"
+	local removed_output=""
+
+	[[ -e "$pending_guard_file" ]] || return 1
+	mv "$pending_guard_file" "$processing" 2>/dev/null || return 1
+	read -r removed_output < "$processing" || removed_output="*"
+	rm -f "$processing"
+	[[ "$removed_output" == "*" ]] && removed_output=""
+	printf '%s\n' "$removed_output"
+}
+
 guard_check() {
 	local removed_output="${1:-}"
+	local pending_output=""
+	local result=0
 
 	(
 		exec 9> "$operation_lock"
-		flock -w 5 9 || exit 0
-		recover_if_needed_locked "$removed_output"
+		if ! flock -w 5 9; then
+			queue_guard_check "$removed_output"
+			exit 1
+		fi
+		if pending_output="$(take_pending_guard)"; then
+			[[ -z "$removed_output" ]] && removed_output="$pending_output"
+		fi
+		RECOVERY_NOTICE=""
+		if recover_if_needed_locked "$removed_output"; then
+			result=0
+		else
+			result=$?
+			queue_guard_check "$removed_output"
+		fi
+		flock -u 9
+		if [[ -n "$RECOVERY_NOTICE" ]]; then
+			refresh_wallpaper || true
+			notify_recovery "$RECOVERY_NOTICE"
+		fi
+		exit "$result"
 	)
 }
 
@@ -1189,12 +1332,15 @@ watch_events() {
 				monitorremoved*)
 					removed_output="$(removed_output_from_event "$event")"
 					sleep 0.05
-					guard_check "$removed_output"
+					emit_guard_event "removed:$removed_output"
 					;;
-				monitoradded*|configreloaded*)
+				monitoradded*)
 					sleep 0.1
-					guard_check
-					[[ "$event" == monitoradded* ]] && refresh_wallpaper || true
+					emit_guard_event added
+					;;
+				configreloaded*)
+					sleep 0.1
+					emit_guard_event check
 					;;
 			esac
 		done < <(socat -U - "UNIX-CONNECT:$socket" 2>/dev/null || true)
@@ -1202,9 +1348,13 @@ watch_events() {
 	done
 }
 
+emit_guard_event() {
+	printf '%s\n' "$1" > "$guard_event_fifo"
+}
+
 handle_drm_event() {
 	case "$1" in
-		KERNEL*) guard_check ;;
+		KERNEL*) emit_guard_event check ;;
 	esac
 }
 
@@ -1222,9 +1372,21 @@ watch_drm_events() {
 watch_guard() {
 	local hypr_event_pid=""
 	local drm_event_pid=""
+	local event=""
+	local removed_output=""
+	local next_poll=0
+	local should_check=false
+	local refresh_after=false
+	local read_timeout="$watcher_health_interval"
 
 	exec 8> "$guard_lock"
 	flock -n 8 || return 0
+	if [[ -e "$guard_event_fifo" && ! -p "$guard_event_fifo" ]]; then
+		printf 'projectorctl: %s exists and is not a FIFO\n' "$guard_event_fifo" >&2
+		return 1
+	fi
+	[[ -p "$guard_event_fifo" ]] || mkfifo -m 600 "$guard_event_fifo"
+	exec 7<> "$guard_event_fifo"
 
 	watch_events 8>&- &
 	hypr_event_pid="$!"
@@ -1233,10 +1395,94 @@ watch_guard() {
 	trap '[[ -n ${hypr_event_pid:-} ]] && kill "$hypr_event_pid" 2>/dev/null || true; [[ -n ${drm_event_pid:-} ]] && kill "$drm_event_pid" 2>/dev/null || true' EXIT
 	trap 'exit 0' INT TERM
 
+	if guard_check; then
+		next_poll=$((SECONDS + guard_poll_interval))
+	else
+		next_poll=$((SECONDS + guard_retry_interval))
+	fi
 	while true; do
-		guard_check
-		sleep "$guard_poll_interval"
+		event=""
+		removed_output=""
+		should_check=false
+		refresh_after=false
+		read_timeout="$watcher_health_interval"
+		[[ -e "$pending_guard_file" ]] && read_timeout="$guard_retry_interval"
+		IFS= read -r -t "$read_timeout" event <&7 || true
+
+		case "$event" in
+			removed:*)
+				removed_output="${event#removed:}"
+				should_check=true
+				;;
+			added)
+				should_check=true
+				refresh_after=true
+				;;
+			check) should_check=true ;;
+		esac
+		if [[ -e "$pending_guard_file" ]] || ((SECONDS >= next_poll)); then
+			should_check=true
+		fi
+
+		if ! kill -0 "$hypr_event_pid" 2>/dev/null; then
+			wait "$hypr_event_pid" 2>/dev/null || true
+			watch_events 8>&- &
+			hypr_event_pid="$!"
+		fi
+		if ! kill -0 "$drm_event_pid" 2>/dev/null; then
+			wait "$drm_event_pid" 2>/dev/null || true
+			watch_drm_events 8>&- &
+			drm_event_pid="$!"
+		fi
+
+		if [[ "$should_check" == true ]]; then
+			if guard_check "$removed_output"; then
+				next_poll=$((SECONDS + guard_poll_interval))
+			else
+				next_poll=$((SECONDS + guard_retry_interval))
+			fi
+		fi
+		[[ "$refresh_after" == true ]] && refresh_wallpaper || true
 	done
+}
+
+manual_recover() {
+	local result=0
+	local response=""
+	local reason="Laptop display restored manually"
+
+	exec 9> "$operation_lock"
+	if ! flock -w 8 9; then
+		emit_apply_error recover "Another display change is still running" false
+		return 1
+	fi
+	if safe_recover "$reason"; then
+		if ! response="$(status_json)"; then
+			response="$(jq -cn '{
+				ok: true,
+				mode: "builtin",
+				modeLabel: "Laptop only",
+				health: "warning",
+				message: "Laptop recovery completed, but the final status check was unavailable",
+				externalAvailable: false,
+				outputs: []
+			}')"
+		fi
+	else
+		response="$(emit_apply_error recover "Could not restore the laptop display" false)"
+		result=1
+	fi
+	flock -u 9
+
+	if [[ -e "$pending_guard_file" ]]; then
+		guard_check || true
+	fi
+	if ((result == 0)); then
+		refresh_wallpaper || true
+		notify_recovery "$reason"
+	fi
+	printf '%s\n' "$response"
+	return "$result"
 }
 
 usage() {
@@ -1258,14 +1504,7 @@ main() {
 			apply_mode "$2"
 			;;
 		recover)
-			exec 9> "$operation_lock"
-			flock -w 8 9 || return 1
-			if safe_recover "Laptop display restored manually"; then
-				status_json
-			else
-				emit_apply_error recover "Could not restore the laptop display" false
-				return 1
-			fi
+			manual_recover
 			;;
 		check)
 			guard_check

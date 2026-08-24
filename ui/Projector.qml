@@ -31,9 +31,14 @@ Scope {
 	property bool errorRecovered: false
 	property string statusOutput: ""
 	property int statusExitCode: 0
+	property bool statusExitSeen: false
+	property bool statusOutputDone: false
 	property string actionOutput: ""
 	property string actionStderr: ""
 	property int actionExitCode: 0
+	property bool actionExitSeen: false
+	property bool actionOutputDone: false
+	property bool actionStderrDone: false
 
 	readonly property string currentMode: statusData.mode || "unknown"
 	readonly property string currentModeLabel: statusData.modeLabel || "Unknown layout"
@@ -123,7 +128,14 @@ Scope {
 			return;
 		statusBusy = true;
 		statusOutput = "";
+		statusExitSeen = false;
+		statusOutputDone = false;
 		statusProcess.exec(["projectorctl", "status"]);
+	}
+
+	function maybeFinishStatus() {
+		if (statusBusy && statusExitSeen && statusOutputDone)
+			finishStatus();
 	}
 
 	function finishStatus() {
@@ -158,7 +170,15 @@ Scope {
 		errorRecovered = false;
 		actionOutput = "";
 		actionStderr = "";
+		actionExitSeen = false;
+		actionOutputDone = false;
+		actionStderrDone = false;
 		actionProcess.exec(["projectorctl", "apply", action]);
+	}
+
+	function maybeFinishAction() {
+		if (actionBusy && actionExitSeen && actionOutputDone && actionStderrDone)
+			finishAction();
 	}
 
 	function finishAction() {
@@ -187,6 +207,8 @@ Scope {
 	}
 
 	function closePanel() {
+		if (actionBusy)
+			return;
 		panelVisible = false;
 		Qt.quit();
 	}
@@ -267,26 +289,40 @@ Scope {
 	Process {
 		id: statusProcess
 		stdout: StdioCollector {
-			onStreamFinished: root.statusOutput = text
+			onStreamFinished: {
+				root.statusOutput = text;
+				root.statusOutputDone = true;
+				root.maybeFinishStatus();
+			}
 		}
 		stderr: StdioCollector {}
 		onExited: function(exitCode) {
 			root.statusExitCode = exitCode;
-			statusResultDelay.restart();
+			root.statusExitSeen = true;
+			root.maybeFinishStatus();
 		}
 	}
 
 	Process {
 		id: actionProcess
 		stdout: StdioCollector {
-			onStreamFinished: root.actionOutput = text
+			onStreamFinished: {
+				root.actionOutput = text;
+				root.actionOutputDone = true;
+				root.maybeFinishAction();
+			}
 		}
 		stderr: StdioCollector {
-			onStreamFinished: root.actionStderr = text
+			onStreamFinished: {
+				root.actionStderr = text;
+				root.actionStderrDone = true;
+				root.maybeFinishAction();
+			}
 		}
 		onExited: function(exitCode) {
 			root.actionExitCode = exitCode;
-			actionResultDelay.restart();
+			root.actionExitSeen = true;
+			root.maybeFinishAction();
 		}
 	}
 
@@ -299,27 +335,6 @@ Scope {
 			root.loadScheme();
 			root.requestStatus();
 		}
-	}
-
-	Timer {
-		interval: 1800
-		running: root.panelVisible
-		repeat: true
-		onTriggered: root.requestStatus()
-	}
-
-	Timer {
-		id: statusResultDelay
-		interval: 20
-		repeat: false
-		onTriggered: root.finishStatus()
-	}
-
-	Timer {
-		id: actionResultDelay
-		interval: 20
-		repeat: false
-		onTriggered: root.finishAction()
 	}
 
 	Timer {
@@ -415,6 +430,7 @@ Scope {
 						QuietButton {
 							glyph: "×"
 							accessibleName: "Close"
+							enabled: !root.actionBusy
 							onClicked: root.closePanel()
 						}
 					}

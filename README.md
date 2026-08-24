@@ -42,6 +42,7 @@ hl.bind("SUPER + P", hl.dsp.exec_cmd("projector-panel"))
 ```
 
 The panel opens on every active screen and does not belong to a workspace. Run the same command again to close it.
+It reads display status once when it opens, after an action, or when you press the refresh button; it does not continuously poll Hyprland while it is open.
 
 ## Without Nix
 
@@ -114,6 +115,7 @@ projectorctl recover
 Press `Ctrl+Alt+F12`. The Home Manager module installs this as a direct recovery binding, so it works without opening the panel.
 
 The guard listens to Hyprland and kernel DRM hotplug events. There is also a slow 60-second check as a fallback, but it stays out of Hyprland when no guarded layout is active.
+Event listeners block while idle. If either listener exits unexpectedly, the guard starts it again.
 
 ## Theme
 

@@ -15,6 +15,7 @@ mkdir -p "$HOME"
 # shellcheck source=/dev/null
 source "$controller_source"
 state_file="$PROJECTORCTL_RUNTIME_DIR/state.json"
+pending_guard_file="$PROJECTORCTL_RUNTIME_DIR/recovery.pending"
 
 pass_count=0
 
@@ -114,6 +115,19 @@ notify_recovery() { return 0; }
 safe_recover "test recovery" || fail "recovery accepts the replacement laptop panel"
 assert_eq eDP-2 "$(state_field builtin)" "recovery forgets a laptop output that no longer exists"
 
+probe_log="$test_root/probes.log"
+(
+	export verification_attempts=3
+	export monitor_probe_timeout=0.2
+	# shellcheck disable=SC2329
+	monitor_json() { printf '%s\n' "$1" >> "$probe_log"; return 1; }
+	if wait_for_output eDP-1 active; then
+		exit 1
+	fi
+)
+assert_eq 3 "$(wc -l < "$probe_log")" "display verification has a fixed probe count"
+assert_eq 0.2 "$(sed -n '1p' "$probe_log")" "display verification uses the short probe timeout"
+
 layout_log="$test_root/layouts.log"
 monitors_with_headless="$(jq -c '. + [{
 	"id": 8,
@@ -188,6 +202,24 @@ forced_recovery_log="$test_root/forced-recovery.log"
 )
 assert_contains "$(<"$forced_recovery_log")" "Projector disconnected" "a removal event forces projector-only recovery"
 
+write_state external eDP-1 HDMI-A-1 "Projector only" info
+write_transition builtin eDP-1 HDMI-A-1 "Switching to laptop only"
+assert_eq external "$(state_field requestedMode)" "an in-progress laptop switch keeps the previous guarded mode"
+assert_eq builtin "$(state_field targetMode)" "an in-progress switch records its target mode"
+assert_eq applying "$(state_field phase)" "an in-progress switch is marked as applying"
+assert_eq HDMI-A-1 "$(state_field guardExternal)" "an in-progress laptop switch keeps the projector guard armed"
+
+transaction_recovery_log="$test_root/transaction-recovery.log"
+(
+	# shellcheck disable=SC2329
+	safe_recover() { printf '%s\n' "$1" > "$transaction_recovery_log"; }
+	recover_if_needed_locked HDMI-A-1 2>/dev/null
+)
+assert_contains "$(<"$transaction_recovery_log")" "Projector disconnected" "an interrupted laptop switch still recovers after unplugging"
+
+write_state builtin eDP-1 HDMI-A-1 "Laptop display is active" info
+assert_eq "" "$(state_field guardExternal)" "a committed laptop layout disarms the projector guard"
+
 kernel_recovery_log="$test_root/kernel-recovery.log"
 mkdir -p "$PROJECTORCTL_DRM_ROOT/card1-HDMI-A-1"
 printf 'disconnected\n' > "$PROJECTORCTL_DRM_ROOT/card1-HDMI-A-1/status"
@@ -236,14 +268,49 @@ idle_check_log="$test_root/idle-check.log"
 [[ ! -e "$idle_check_log" ]] || fail "an idle guard check queried Hyprland"
 pass "the guard leaves Hyprland alone when no fail-safe is armed"
 
+write_state external eDP-1 HDMI-A-1 "Projector only" info
+if (
+	# shellcheck disable=SC2329
+	monitor_json() { return 1; }
+	recover_if_needed_locked
+); then
+	fail "a guarded Hyprland outage was treated as a successful check"
+fi
+pass "a guarded Hyprland outage stays pending for retry"
+
 drm_event_log="$test_root/drm-event.log"
 (
 	# shellcheck disable=SC2329
-	guard_check() { printf 'checked\n' >> "$drm_event_log"; }
+	emit_guard_event() { printf '%s\n' "$1" >> "$drm_event_log"; }
 	handle_drm_event "monitor will print the received events"
 	handle_drm_event "KERNEL[10.0] change /devices/pci/drm/card1 (drm)"
 )
-assert_eq checked "$(<"$drm_event_log")" "a kernel DRM event runs the guard"
+assert_eq check "$(<"$drm_event_log")" "a kernel DRM event queues a guard check"
+
+rm -f "$pending_guard_file"
+(
+	# shellcheck disable=SC2329
+	recover_if_needed_locked() { return 1; }
+	guard_check 2>/dev/null || true
+)
+[[ -e "$pending_guard_file" ]] || fail "a failed guard check was not queued"
+pass "a failed guard check is queued for retry"
+rm -f "$pending_guard_file"
+
+queue_guard_check HDMI-A-1
+queue_guard_check
+assert_eq HDMI-A-1 "$(<"$pending_guard_file")" "a generic retry does not overwrite a specific removal event"
+rm -f "$pending_guard_file"
+
+status_failure=""
+if status_failure="$({
+	# shellcheck disable=SC2329
+	monitor_json() { return 1; }
+	status_json
+})"; then
+	fail "an unavailable status returned success"
+fi
+assert_eq false "$(jq -r .ok <<< "$status_failure")" "an unavailable status returns error JSON and a failing exit code"
 
 if main apply >/dev/null 2>&1; then
 	fail "apply without a mode should fail"
