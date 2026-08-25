@@ -1,10 +1,19 @@
--- projectorctl writes the current layout here, then reloads Hyprland. Monitor
--- rules must be evaluated by the configured Lua file to take effect.
-local projectorLayoutPath = os.getenv("HOME") .. "/.cache/hypr/projector-layout.lua"
-local projectorLayoutOk, projectorLayout = pcall(dofile, projectorLayoutPath)
-if projectorLayoutOk and type(projectorLayout) == "table" then
-	for _, rule in ipairs(projectorLayout) do
-		hl.monitor(rule)
+-- The persistent file is always a private laptop-only baseline. Presentation
+-- layouts live in XDG_RUNTIME_DIR, so they cannot survive a reboot or login.
+local projectorLayoutPaths = {
+	os.getenv("HOME") .. "/.cache/hypr/projector-private-layout.lua",
+}
+local projectorRuntimeDir = os.getenv("XDG_RUNTIME_DIR")
+if projectorRuntimeDir then
+	table.insert(projectorLayoutPaths, projectorRuntimeDir .. "/projector-layout.lua")
+end
+
+for _, path in ipairs(projectorLayoutPaths) do
+	local ok, layout = pcall(dofile, path)
+	if ok and type(layout) == "table" then
+		for _, rule in ipairs(layout) do
+			hl.monitor(rule)
+		end
 	end
 end
 

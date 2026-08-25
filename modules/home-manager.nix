@@ -4,7 +4,9 @@ let
   controller = pkgs.writeShellApplication {
     name = "projectorctl";
     runtimeInputs = [ pkgs.coreutils pkgs.jq pkgs.libnotify pkgs.socat pkgs.systemd pkgs.util-linux ];
-    text = builtins.readFile ../src/projectorctl.sh;
+    text = ''
+      PROJECTORCTL_LIB_DIR=${../src/lib}
+    '' + builtins.readFile ../src/projectorctl.sh;
   };
   panel = pkgs.writeShellApplication {
     name = "projector-panel";

@@ -105,8 +105,6 @@ Scope {
 	function modeAccent(mode) {
 		if (mode === "builtin")
 			return laptopAccent;
-		if (mode === "external")
-			return projectorAccent;
 		return active;
 	}
 
@@ -265,12 +263,9 @@ Scope {
 			applyMode("duplicate");
 			event.accepted = true;
 		} else if (event.key === Qt.Key_3) {
-			applyMode("external");
-			event.accepted = true;
-		} else if (event.key === Qt.Key_4) {
 			applyMode("extend-right");
 			event.accepted = true;
-		} else if (event.key === Qt.Key_5) {
+		} else if (event.key === Qt.Key_4) {
 			applyMode("extend-left");
 			event.accepted = true;
 		}
@@ -479,7 +474,7 @@ Scope {
 					Text {
 						Layout.topMargin: 16
 						Layout.bottomMargin: 8
-						text: "Where should this desktop go?"
+						text: "Display policy"
 						color: root.text
 						font.pixelSize: 12
 						font.weight: Font.DemiBold
@@ -487,7 +482,7 @@ Scope {
 
 					Rectangle {
 						Layout.fillWidth: true
-						Layout.preferredHeight: 286
+						Layout.preferredHeight: 232
 						radius: 8
 						color: root.surface
 						border.color: root.line
@@ -503,8 +498,8 @@ Scope {
 								Layout.fillHeight: true
 								actionId: "builtin"
 								shortcutText: "1"
-								titleText: "Laptop only"
-								detailText: "Turn every external display off"
+								titleText: "Private / laptop only"
+								detailText: "Disable every external and unknown output"
 								externalRequired: false
 								onClicked: root.applyMode(actionId)
 							}
@@ -516,20 +511,8 @@ Scope {
 								Layout.fillHeight: true
 								actionId: "duplicate"
 								shortcutText: "2"
-								titleText: "Mirror"
-								detailText: "Show the same desktop on both"
-								onClicked: root.applyMode(actionId)
-							}
-
-							Hairline { Layout.fillWidth: true }
-
-							ModeRow {
-								Layout.fillWidth: true
-								Layout.fillHeight: true
-								actionId: "external"
-								shortcutText: "3"
-								titleText: "Projector only"
-								detailText: "Laptop wakes if the cable comes out"
+								titleText: "Present / mirror"
+								detailText: "Explicitly share the laptop desktop"
 								onClicked: root.applyMode(actionId)
 							}
 
@@ -539,7 +522,7 @@ Scope {
 								Layout.fillWidth: true
 								Layout.fillHeight: true
 								actionId: "extend-right"
-								shortcutText: "4"
+								shortcutText: "3"
 								titleText: "Extend right"
 								detailText: "Put the projector to the right"
 								onClicked: root.applyMode(actionId)
@@ -551,7 +534,7 @@ Scope {
 								Layout.fillWidth: true
 								Layout.fillHeight: true
 								actionId: "extend-left"
-								shortcutText: "5"
+								shortcutText: "4"
 								titleText: "Extend left"
 								detailText: "Put the projector to the left"
 								onClicked: root.applyMode(actionId)
@@ -825,7 +808,7 @@ Scope {
 		required property string modeId
 		required property bool lit
 		readonly property bool projectorFirst: modeId === "extend-left"
-		readonly property bool laptopOn: modeId !== "external"
+		readonly property bool laptopOn: true
 		readonly property bool projectorOn: modeId !== "builtin" && lit
 		readonly property int laptopX: projectorFirst ? 40 : 1
 		readonly property int projectorX: projectorFirst ? 1 : 40

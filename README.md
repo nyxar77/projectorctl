@@ -1,6 +1,6 @@
 # projectorctl
 
-A small display switcher for Hyprland laptops. It handles laptop-only, projector-only, mirror, and extended layouts without an `xrandr` script or a streamed virtual display.
+A small display switcher for Hyprland laptops. It handles private laptop-only, explicit presentation, and extended layouts without an `xrandr` script or a streamed virtual display.
 
 ![projectorctl panel](preview/preview0.png)
 
@@ -48,15 +48,17 @@ It reads display status once when it opens, after an action, or when you press t
 
 The CLI needs Bash, `jq`, `socat`, `timeout`, `flock`, and `udevadm`. Hyprland and a working `hyprctl` are assumed. `notify-send` and Caelestia are optional.
 
-Install the two scripts somewhere on your `PATH`:
+Install the scripts and controller modules somewhere on your `PATH`:
 
 ```sh
 install -Dm755 src/projectorctl.sh ~/.local/bin/projectorctl
+install -d ~/.local/share/projectorctl/lib
+install -Dm644 src/lib/*.sh ~/.local/share/projectorctl/lib/
 install -Dm755 src/projector-panel.sh ~/.local/bin/projector-panel
 install -Dm644 ui/Projector.qml ~/.local/share/projectorctl/Projector.qml
 ```
 
-The CLI works directly after that. To open the panel, point it at the QML file:
+The controller finds its modules in `~/.local/share/projectorctl/lib`. To open the panel, point it at the QML file:
 
 ```sh
 PROJECTORCTL_PANEL_QML=/path/to/projectorctl/ui/Projector.qml projector-panel
@@ -101,20 +103,19 @@ systemctl --user enable --now projector-display-guard.service
 ```sh
 projectorctl status
 projectorctl apply builtin
-projectorctl apply external
 projectorctl apply duplicate
 projectorctl apply extend-left
 projectorctl apply extend-right
 projectorctl recover
 ```
 
-`external` means projector only. `recover` brings the laptop panel back.
+`builtin` is the fail-closed Private mode: the laptop stays active and all external or unknown outputs are disabled. `duplicate` explicitly presents the laptop desktop on one external output. `recover` returns to Private mode. Projector-only was removed because disabling the laptop forces Hyprland to relocate workspaces.
 
 ## If the screen stays black
 
 Press `Ctrl+Alt+F12`. The Home Manager module installs this as a direct recovery binding, so it works without opening the panel.
 
-The guard listens to Hyprland and kernel DRM hotplug events. There is also a slow 60-second check as a fallback, but it stays out of Hyprland when no guarded layout is active.
+The guard starts in Private mode, listens to Hyprland and kernel DRM hotplug events, and returns to Private mode if a presentation output disappears. Presentation rules are session-only, so a reboot or new login cannot silently resume sharing. There is also a slow 60-second check as a fallback, but it stays out of Hyprland when no presentation layout is active.
 Event listeners block while idle. If either listener exits unexpectedly, the guard starts it again.
 
 ## Theme

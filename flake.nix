@@ -23,7 +23,9 @@
             pkgs.systemd
             pkgs.util-linux
           ];
-          text = builtins.readFile ./src/projectorctl.sh;
+          text = ''
+            PROJECTORCTL_LIB_DIR=${./src/lib}
+          '' + builtins.readFile ./src/projectorctl.sh;
         };
 
         packages.panel = pkgs.writeShellApplication {
@@ -51,7 +53,19 @@
             ${./tests/controller.bash} \
             ${./tests/panel.bash} \
             ${./tests/fake-quickshell}
-          PROJECTORCTL_SOURCE=${./src/projectorctl.sh} bash ${./tests/controller.bash}
+          # These files are sourced modules. Their shared globals are defined by
+          # config.sh and consumed across module boundaries.
+          shellcheck -s bash -e SC2034,SC2154 \
+            ${./src/lib/config.sh} \
+            ${./src/lib/runtime.sh} \
+            ${./src/lib/state.sh} \
+            ${./src/lib/hyprland.sh} \
+            ${./src/lib/layouts.sh} \
+            ${./src/lib/status.sh} \
+            ${./src/lib/guard.sh}
+          PROJECTORCTL_SOURCE=${./src/projectorctl.sh} \
+            PROJECTORCTL_LIB_DIR=${./src/lib} \
+            bash ${./tests/controller.bash}
           PROJECTORCTL_PANEL_SOURCE=${./src/projector-panel.sh} \
             PROJECTORCTL_FAKE_QUICKSHELL=${./tests/fake-quickshell} \
             bash ${./tests/panel.bash}
