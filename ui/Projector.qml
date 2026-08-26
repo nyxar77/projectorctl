@@ -33,12 +33,21 @@ Scope {
 	property int statusExitCode: 0
 	property bool statusExitSeen: false
 	property bool statusOutputDone: false
+	property bool statusTimedOut: false
 	property string actionOutput: ""
 	property string actionStderr: ""
 	property int actionExitCode: 0
 	property bool actionExitSeen: false
 	property bool actionOutputDone: false
 	property bool actionStderrDone: false
+	property bool actionTimedOut: false
+	property bool audioBusy: false
+	property var audioSinks: []
+	property string audioOutput: ""
+	property int audioCommandExitCode: 1
+	property bool audioOutputDone: false
+	property bool audioExitSeen: false
+	property bool audioSettingDefault: false
 
 	readonly property string currentMode: statusData.mode || "unknown"
 	readonly property string currentModeLabel: statusData.modeLabel || "Unknown layout"
@@ -128,7 +137,9 @@ Scope {
 		statusOutput = "";
 		statusExitSeen = false;
 		statusOutputDone = false;
+		statusTimedOut = false;
 		statusProcess.exec(["projectorctl", "status"]);
+		statusWatchdog.restart();
 	}
 
 	function maybeFinishStatus() {
@@ -137,27 +148,40 @@ Scope {
 	}
 
 	function finishStatus() {
+		const timedOut = statusTimedOut;
 		statusBusy = false;
-		const payload = parsePayload(statusOutput);
-		if (payload) {
-			applyStatus(payload);
-			return;
-		}
-		if (statusExitCode !== 0) {
+		statusTimedOut = false;
+		statusWatchdog.stop();
+		if (timedOut) {
 			statusData = {
 				ok: false,
 				mode: "unavailable",
 				modeLabel: "Display service unavailable",
 				health: "error",
-				message: "projectorctl did not return a status",
+				message: "projectorctl status timed out",
 				externalAvailable: false,
 				outputs: []
 			};
+			return;
 		}
+		const payload = parsePayload(statusOutput);
+		if (payload) {
+			applyStatus(payload);
+			return;
+		}
+		statusData = {
+			ok: false,
+			mode: "unavailable",
+			modeLabel: "Display service unavailable",
+			health: "error",
+			message: statusExitCode !== 0 ? "projectorctl could not read display status" : "projectorctl returned invalid status data",
+			externalAvailable: false,
+			outputs: []
+		};
 	}
 
 	function applyMode(action) {
-		if (actionBusy || action === currentMode)
+		if (statusBusy || actionBusy || action === currentMode)
 			return;
 		if (action !== "builtin" && !externalAvailable)
 			return;
@@ -171,7 +195,9 @@ Scope {
 		actionExitSeen = false;
 		actionOutputDone = false;
 		actionStderrDone = false;
+		actionTimedOut = false;
 		actionProcess.exec(["projectorctl", "apply", action]);
+		actionWatchdog.restart();
 	}
 
 	function maybeFinishAction() {
@@ -181,9 +207,19 @@ Scope {
 
 	function finishAction() {
 		const action = pendingAction;
+		const timedOut = actionTimedOut;
 		const payload = parsePayload(actionOutput);
 		actionBusy = false;
+		actionTimedOut = false;
+		actionWatchdog.stop();
 		pendingAction = "";
+		if (timedOut) {
+			errorAction = action;
+			errorText = "Display change timed out; checking the current state";
+			errorRecovered = payload && payload.recovered === true;
+			refreshAfterError.start();
+			return;
+		}
 
 		if (actionExitCode === 0 && payload && payload.ok === true && payload.result === "success") {
 			applyStatus(payload);
@@ -209,6 +245,71 @@ Scope {
 			return;
 		panelVisible = false;
 		Qt.quit();
+	}
+
+	function refreshAudioSinks() {
+		audioBusy = true;
+		audioSettingDefault = false;
+		audioOutput = "";
+		audioOutputDone = false;
+		audioExitSeen = false;
+		audioProcess.exec(["wpctl", "status", "-n"]);
+	}
+
+	function finishAudioQuery() {
+		if (!audioExitSeen || !audioOutputDone)
+			return;
+		audioBusy = false;
+		if (audioSettingDefault) {
+			audioSettingDefault = false;
+			refreshAudioSinks();
+			return;
+		}
+		audioSinks = [];
+		if (audioCommandExitCode !== 0)
+			return;
+		let inSinks = false;
+		const parsed = [];
+		for (const line of audioOutput.split("\n")) {
+			if (line.indexOf("Sinks") >= 0) {
+				inSinks = true;
+				continue;
+			}
+			if (inSinks && line.indexOf("Sources") >= 0)
+				break;
+			if (!inSinks)
+				continue;
+			const match = line.match(/(\*)?\s*(\d+)\.\s+(alsa_output\.\S+)/);
+			if (!match || match[3].indexOf("alsa_output.") !== 0)
+				continue;
+			parsed.push({
+				id: Number(match[2]),
+				name: match[3],
+				label: match[3].replace(/^alsa_output\./, "").replaceAll("_", " "),
+				defaultSink: Boolean(match[1])
+			});
+		}
+		audioSinks = parsed;
+	}
+
+	function audioSinksFor(output) {
+		if (!output || output.active !== true)
+			return [];
+		const external = output.projector === true || output.internal !== true;
+		return audioSinks.filter(sink => external
+			? /HDMI|DP|DISPLAYPORT/i.test(sink.name)
+			: !/HDMI|DP|DISPLAYPORT/i.test(sink.name));
+	}
+
+	function setAudioOutput(sink) {
+		if (!sink || audioBusy)
+			return;
+		audioBusy = true;
+		audioSettingDefault = true;
+		audioCommandExitCode = 1;
+		audioOutputDone = false;
+		audioExitSeen = false;
+		audioProcess.exec(["wpctl", "set-default", String(sink.id)]);
 	}
 
 	function outputByName(name) {
@@ -321,6 +422,23 @@ Scope {
 		}
 	}
 
+	Process {
+		id: audioProcess
+		stdout: StdioCollector {
+			onStreamFinished: {
+				root.audioOutput = text;
+				root.audioOutputDone = true;
+				root.finishAudioQuery();
+			}
+		}
+		stderr: StdioCollector {}
+		onExited: function(exitCode) {
+			root.audioCommandExitCode = exitCode;
+			root.audioExitSeen = true;
+			root.finishAudioQuery();
+		}
+	}
+
 	Timer {
 		id: startupTimer
 		interval: 60
@@ -328,6 +446,7 @@ Scope {
 		repeat: false
 		onTriggered: {
 			root.loadScheme();
+			root.refreshAudioSinks();
 			root.requestStatus();
 		}
 	}
@@ -337,6 +456,33 @@ Scope {
 		interval: 120
 		repeat: false
 		onTriggered: root.requestStatus()
+	}
+
+	Timer {
+		id: statusWatchdog
+		interval: 6000
+		repeat: false
+		onTriggered: {
+			if (!root.statusBusy)
+				return;
+			root.statusTimedOut = true;
+			statusProcess.signal(9);
+		}
+	}
+
+	Timer {
+		id: actionWatchdog
+		interval: 30000
+		repeat: false
+		onTriggered: {
+			if (!root.actionBusy)
+				return;
+			root.errorAction = root.pendingAction;
+			root.errorText = "Display change timed out; checking the current state";
+			root.errorRecovered = false;
+			root.actionTimedOut = true;
+			actionProcess.running = false;
+		}
 	}
 
 	Timer {
@@ -418,7 +564,7 @@ Scope {
 						QuietButton {
 							glyph: "↻"
 							accessibleName: "Refresh status"
-							enabled: !root.actionBusy
+							enabled: !root.actionBusy && !root.statusBusy
 							onClicked: root.requestStatus()
 						}
 
@@ -588,6 +734,11 @@ Scope {
 				: quietButton.hovered ? root.hover : "transparent"
 		}
 
+		HoverHandler {
+			enabled: quietButton.enabled
+			cursorShape: Qt.PointingHandCursor
+		}
+
 		contentItem: Text {
 			text: quietButton.glyph
 			color: quietButton.enabled ? root.dim : root.faded(root.dim, 0.4)
@@ -595,6 +746,59 @@ Scope {
 			horizontalAlignment: Text.AlignHCenter
 			verticalAlignment: Text.AlignVCenter
 		}
+	}
+
+	component AudioOutputButton: Button {
+		id: audioButton
+
+		required property var outputData
+		readonly property var sinks: root.audioSinksFor(outputData)
+		readonly property bool isDefault: sinks.some(sink => sink.defaultSink === true)
+
+		text: "♪"
+		Accessible.name: "Choose audio output for " + (outputData ? outputData.name : "monitor")
+		enabled: sinks.length > 0 && !root.audioBusy
+		implicitWidth: 24
+		implicitHeight: 28
+		padding: 0
+		font.pixelSize: 16
+		contentItem: Text {
+			text: audioButton.text
+		color: audioButton.isDefault
+			? root.active
+			: audioButton.enabled ? root.projectorAccent : root.faded(root.line, 0.55)
+			horizontalAlignment: Text.AlignHCenter
+			verticalAlignment: Text.AlignVCenter
+		}
+		background: Rectangle {
+			radius: 5
+			color: audioButton.isDefault
+				? root.faded(root.active, 0.16)
+				: audioButton.down
+				? root.faded(root.text, 0.12)
+				: audioButton.hovered && audioButton.enabled ? root.hover : "transparent"
+		}
+
+		HoverHandler {
+			enabled: audioButton.enabled
+			cursorShape: Qt.PointingHandCursor
+		}
+
+		Menu {
+			id: audioMenu
+			Repeater {
+				model: audioButton.sinks
+				delegate: MenuItem {
+					text: modelData.label
+					checkable: true
+					checked: modelData.defaultSink === true
+					onTriggered: root.setAudioOutput(modelData)
+					HoverHandler { cursorShape: Qt.PointingHandCursor }
+				}
+			}
+		}
+
+		onClicked: audioMenu.open()
 	}
 
 	component DisplayPair: Rectangle {
@@ -691,6 +895,12 @@ Scope {
 			}
 		}
 
+		AudioOutputButton {
+			Layout.preferredWidth: 24
+			Layout.preferredHeight: 28
+			outputData: monitorLabel.outputData
+		}
+
 		ColumnLayout {
 			Layout.fillWidth: true
 			spacing: 1
@@ -732,12 +942,17 @@ Scope {
 
 		text: titleText
 		Accessible.description: detailText
-		enabled: !root.actionBusy && !unavailable && !isCurrent
+		enabled: !root.actionBusy && !root.statusBusy && !unavailable && !isCurrent
 		opacity: unavailable ? 0.42 : 1
 		leftPadding: 12
 		rightPadding: 12
 		topPadding: 5
 		bottomPadding: 5
+
+		HoverHandler {
+			enabled: modeRow.enabled
+			cursorShape: Qt.PointingHandCursor
+		}
 
 		background: Rectangle {
 			radius: 7

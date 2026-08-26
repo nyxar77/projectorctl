@@ -15,7 +15,16 @@ pid_file="$runtime_dir/panel.pid"
 lock_file="$runtime_dir/panel.lock"
 
 umask 077
+if [[ -L "$runtime_dir" || ( -e "$runtime_dir" && ! -d "$runtime_dir" ) ]]; then
+	printf 'projector-panel: unsafe runtime path: %s\n' "$runtime_dir" >&2
+	exit 1
+fi
 mkdir -p "$runtime_dir"
+[[ -O "$runtime_dir" ]] || {
+	printf 'projector-panel: runtime directory is not owned by this user: %s\n' "$runtime_dir" >&2
+	exit 1
+}
+chmod 700 "$runtime_dir"
 
 panel_is_live() {
 	local pid="$1"
@@ -78,7 +87,7 @@ rm -f "$pid_file"
 panel_pid=""
 trap cleanup_own_panel EXIT
 trap 'exit 0' INT TERM HUP
-"$quickshell_bin" -p "$PROJECTORCTL_PANEL_QML" "$@" &
+"$quickshell_bin" -p "$PROJECTORCTL_PANEL_QML" "$@" 9>&- &
 panel_pid="$!"
 printf '%s\n' "$panel_pid" > "$pid_file"
 flock -u 9

@@ -46,6 +46,7 @@ in {
         ExecStopPost = "-${controller}/bin/projectorctl check";
         Restart = "always";
         RestartSec = 1;
+        TimeoutStopSec = 10;
       };
       Install.WantedBy = [ "graphical-session.target" ];
     };

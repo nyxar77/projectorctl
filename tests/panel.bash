@@ -4,6 +4,7 @@ set -Eeuo pipefail
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 panel_source="${PROJECTORCTL_PANEL_SOURCE:-$repo_root/src/projector-panel.sh}"
 fake_source="${PROJECTORCTL_FAKE_QUICKSHELL:-$repo_root/tests/fake-quickshell}"
+qml_source="${PROJECTORCTL_QML_SOURCE:-$repo_root/ui/Projector.qml}"
 test_root="$(mktemp -d)"
 runtime_dir="$test_root/run"
 fake_quickshell="$test_root/quickshell"
@@ -46,6 +47,10 @@ done
 
 [[ "$panel_pid" =~ ^[0-9]+$ && "$panel_pid" != "$unrelated_pid" ]] || {
 	printf 'panel did not start\n' >&2
+	exit 1
+}
+[[ ! -e "/proc/$panel_pid/fd/9" ]] || {
+	printf 'panel inherited the launcher lock descriptor\n' >&2
 	exit 1
 }
 kill -0 "$unrelated_pid" 2>/dev/null || {
@@ -101,4 +106,34 @@ panel_pid=""
 	exit 1
 }
 
-printf 'ok - ignores stale pids, toggles, and cleans up on exit\n'
+qml_text="$(sed -n '1,999p' "$qml_source")"
+[[ "$qml_text" == *'if (statusBusy || actionBusy || action === currentMode)'* ]] || {
+	printf 'QML permits an apply/status race\n' >&2
+	exit 1
+}
+[[ "$qml_text" == *'id: statusWatchdog'* && "$qml_text" == *'id: actionWatchdog'* ]] || {
+	printf 'QML command watchdogs are missing\n' >&2
+	exit 1
+}
+[[ "$qml_text" == *'statusProcess.signal(9)'* && "$qml_text" == *'actionProcess.running = false'* ]] || {
+	printf 'QML watchdogs release state without stopping their old process\n' >&2
+	exit 1
+}
+[[ "$qml_text" == *'"wpctl", "status", "-n"'* && "$qml_text" == *'function audioSinksFor(output)'* ]] || {
+	printf 'audio controls do not probe and filter backend sinks\n' >&2
+	exit 1
+}
+[[ "$qml_text" == *'set-default'* && "$qml_text" == *'AudioOutputButton'* ]] || {
+	printf 'audio controls do not use the shared audio backend per monitor\n' >&2
+	exit 1
+}
+[[ "$qml_text" == *'readonly property bool isDefault'* && "$qml_text" == *'root.active'* ]] || {
+	printf 'active audio output is not marked with the primary colour\n' >&2
+	exit 1
+}
+[[ "$qml_text" == *'cursorShape: Qt.PointingHandCursor'* ]] || {
+	printf 'interactive controls do not use a pointing-hand cursor\n' >&2
+	exit 1
+}
+
+printf 'ok - ignores stale pids, closes lock fds, toggles, cleans up, and guards QML command races\n'

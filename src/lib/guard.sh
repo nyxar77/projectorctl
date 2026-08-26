@@ -1,55 +1,90 @@
-guard_mode_is_armed() {
-	case "$1" in duplicate|extend-right|extend-left) return 0 ;; *) return 1 ;; esac
+queue_guard_check() {
+	local removed_output="${1:-*}" existing="" temporary="$pending_guard_file.tmp.${BASHPID}"
+	if [[ -r "$pending_guard_file" ]] && read -r existing < "$pending_guard_file"; then
+		[[ -n "$existing" && "$existing" != "*" ]] && return 0
+	fi
+	printf '%s\n' "$removed_output" > "$temporary" || return 1
+	mv -f "$temporary" "$pending_guard_file" || {
+		rm -f "$temporary"
+		return 1
+	}
+}
+
+take_pending_guard() {
+	local processing="$pending_guard_file.processing.${BASHPID}" removed_output=""
+	[[ -e "$pending_guard_file" ]] || return 1
+	mv "$pending_guard_file" "$processing" 2>/dev/null || return 1
+	read -r removed_output < "$processing" || removed_output="*"
+	rm -f "$processing"
+	[[ "$removed_output" == "*" ]] && removed_output=""
+	printf '%s\n' "$removed_output"
+}
+
+recover_with_notice() {
+	local reason="$1"
+	recover_private "$reason" || return 1
+	RECOVERY_NOTICE="$reason"
 }
 
 recover_if_needed_locked() {
-	local removed_output="${1:-}" state="" requested="" phase="" guarded="" monitors="" active_monitors=""
+	local removed_output="${1:-}" state="" requested="" phase="" guarded="" remembered_builtin="" monitors=""
 	state="$(read_state)"
-	requested="$(jq -r '.requestedMode // empty' <<< "$state")"
-	phase="$(jq -r '.phase // "committed"' <<< "$state")"
-	if [[ "$phase" != committed ]]; then
-		recover_private "An interrupted display change was reset to Private mode" || return 1
-		RECOVERY_NOTICE="An interrupted display change was reset to Private mode"
-		return 0
+	if ! state_is_current "$state"; then
+		recover_with_notice "Display state was missing or incompatible; Private mode was restored"
+		return
 	fi
-	guard_mode_is_armed "$requested" || return 0
-	guarded="$(jq -r '.guardExternal // .external // empty' <<< "$state")"
+	requested="$(jq -r '.requestedMode' <<< "$state")"
+	phase="$(jq -r '.phase' <<< "$state")"
+	guarded="$(jq -r '.guardExternal // .external' <<< "$state")"
+	remembered_builtin="$(jq -r '.builtin' <<< "$state")"
+	if [[ "$phase" != committed ]]; then
+		recover_with_notice "An interrupted display change was reset to Private mode"
+		return
+	fi
+	# `external` is a legacy projector-only mode. It is never preserved after an upgrade.
+	if [[ "$requested" == external ]]; then
+		recover_with_notice "Legacy projector-only state was reset to Private mode"
+		return
+	fi
 	if [[ -n "$removed_output" && "$removed_output" == "$guarded" ]] || drm_connector_is_disconnected "$guarded"; then
-		recover_private "Projector disconnected; Private mode was restored" || return 1
-		RECOVERY_NOTICE="Projector disconnected; Private mode was restored"
-		return 0
+		recover_with_notice "Projector disconnected; Private mode was restored"
+		return
 	fi
 	monitors="$(monitor_json)" || return 1
-	active_monitors="$(active_monitor_json)" || active_monitors="$monitors"
-	if ! output_is_active "$active_monitors" "$guarded" || ! output_is_active "$active_monitors" "$(jq -r '.builtin // empty' <<< "$state")"; then
-		recover_private "A presentation output failed; Private mode was restored" || return 1
-		RECOVERY_NOTICE="A presentation output failed; Private mode was restored"
+	select_outputs "$monitors" || return 1
+	if output_exists "$monitors" "$remembered_builtin"; then
+		BUILTIN_OUTPUT="$remembered_builtin"
 	fi
-}
-
-queue_guard_check() {
-	local removed_output="${1:-*}" temporary="$pending_guard_file.tmp.$BASHPID"
-	printf '%s\n' "$removed_output" > "$temporary"
-	mv -f "$temporary" "$pending_guard_file"
+	if ! layout_matches "$monitors" "$requested" "$BUILTIN_OUTPUT" "$guarded"; then
+		if [[ "$requested" == builtin ]]; then
+			recover_with_notice "Display topology changed unexpectedly; Private mode was restored"
+		else
+			recover_with_notice "A presentation output failed or changed; Private mode was restored"
+		fi
+	fi
 }
 
 guard_check() {
-	local removed_output="${1:-}" result=0
+	local removed_output="${1:-}" pending_output="" result=0
 	(
 		exec 9> "$operation_lock"
-		if ! flock -w 5 9; then
+		if ! flock -w 3 9; then
 			queue_guard_check "$removed_output"
 			exit 1
 		fi
+		if pending_output="$(take_pending_guard)"; then
+			[[ -n "$pending_output" ]] && removed_output="$pending_output"
+		fi
 		RECOVERY_NOTICE=""
 		recover_if_needed_locked "$removed_output" || result=$?
-		if ((result == 0)); then rm -f "$pending_guard_file"
-		else queue_guard_check "$removed_output"
+		if ((result != 0)); then
+			queue_guard_check "$removed_output"
 		fi
 		flock -u 9
+		exec 9>&-
 		if [[ -n "$RECOVERY_NOTICE" ]]; then
-			refresh_wallpaper || true
-			notify_recovery "$RECOVERY_NOTICE"
+			refresh_wallpaper >/dev/null 2>&1 &
+			notify_recovery "$RECOVERY_NOTICE" >/dev/null 2>&1 &
 		fi
 		exit "$result"
 	)
@@ -77,8 +112,7 @@ watch_events() {
 		while IFS= read -r event; do
 			case "$event" in
 				monitorremoved*) removed_output="$(removed_output_from_event "$event")"; emit_guard_event "removed:$removed_output" ;;
-				monitoradded*) emit_guard_event check ;;
-				configreloaded*) emit_guard_event check ;;
+				monitoradded*|configreloaded*) emit_guard_event check ;;
 			esac
 		done < <(socat -U - "UNIX-CONNECT:$socket" 2>/dev/null || true)
 		sleep 0.5
@@ -106,21 +140,27 @@ watch_guard() {
 	[[ -p "$guard_event_fifo" ]] || mkfifo -m 600 "$guard_event_fifo"
 	exec 7<> "$guard_event_fifo"
 
-	# A service restart never resumes presentation. It establishes the private baseline first.
-	manual_recover >/dev/null || printf 'projectorctl: could not establish Private mode on startup\n' >&2
 	watch_events 8>&- & hypr_event_pid=$!
 	watch_drm_events 8>&- & drm_event_pid=$!
 	trap 'kill "${hypr_event_pid:-}" "${drm_event_pid:-}" 2>/dev/null || true' EXIT
 	trap 'exit 0' INT TERM
-	next_poll=$((SECONDS + guard_poll_interval))
+	if guard_check; then
+		next_poll=$((SECONDS + guard_poll_interval))
+	else
+		queue_guard_check
+		next_poll=$((SECONDS + guard_retry_interval))
+	fi
 	while true; do
 		event=""; removed_output=""; read_timeout="$watcher_health_interval"
 		[[ -e "$pending_guard_file" ]] && read_timeout="$guard_retry_interval"
 		IFS= read -r -t "$read_timeout" event <&7 || true
 		[[ "$event" == removed:* ]] && removed_output="${event#removed:}"
 		if [[ -n "$event" || -e "$pending_guard_file" || $SECONDS -ge $next_poll ]]; then
-			guard_check "$removed_output" || true
-			next_poll=$((SECONDS + guard_poll_interval))
+			if guard_check "$removed_output"; then
+				next_poll=$((SECONDS + guard_poll_interval))
+			else
+				next_poll=$((SECONDS + guard_retry_interval))
+			fi
 		fi
 		if ! kill -0 "$hypr_event_pid" 2>/dev/null; then wait "$hypr_event_pid" 2>/dev/null || true; watch_events 8>&- & hypr_event_pid=$!; fi
 		if ! kill -0 "$drm_event_pid" 2>/dev/null; then wait "$drm_event_pid" 2>/dev/null || true; watch_drm_events 8>&- & drm_event_pid=$!; fi

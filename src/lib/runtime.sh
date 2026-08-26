@@ -50,35 +50,60 @@ resolve_instance() {
 monitor_json() {
 	local query_timeout="${1:-$monitor_timeout}" monitors=""
 	resolve_instance || return 1
-	monitors="$(timeout "$query_timeout" "$hyprctl_bin" -j monitors all 2>/dev/null)" || return 1
-	jq -e 'type == "array"' <<< "$monitors" >/dev/null 2>&1 || return 1
+	monitors="$(run_bounded "$query_timeout" "$hyprctl_bin" -j monitors all 2>/dev/null)" || return 1
+	monitor_snapshot_is_valid "$monitors" || return 1
 	printf '%s\n' "$monitors"
 }
 
 active_monitor_json() {
 	local query_timeout="${1:-$monitor_timeout}" monitors=""
 	resolve_instance || return 1
-	monitors="$(timeout "$query_timeout" "$hyprctl_bin" -j monitors 2>/dev/null)" || return 1
-	jq -e 'type == "array"' <<< "$monitors" >/dev/null 2>&1 || return 1
+	monitors="$(run_bounded "$query_timeout" "$hyprctl_bin" -j monitors 2>/dev/null)" || return 1
+	monitor_snapshot_is_valid "$monitors" || return 1
 	printf '%s\n' "$monitors"
+}
+
+monitor_snapshot_is_valid() {
+	jq -e '
+		type == "array"
+		and (([.[].name] | length) == ([.[].name] | unique | length))
+		and all(.[]; type == "object"
+			and (.name | type == "string" and length > 0)
+			and (.id | type == "number")
+			and (.disabled | type == "boolean")
+			and (.dpmsStatus | type == "boolean")
+			and (.x | type == "number")
+			and (.y | type == "number"))
+	' <<< "$1" >/dev/null 2>&1
 }
 
 select_outputs() {
 	local monitors="$1" remembered_external=""
+	monitor_snapshot_is_valid "$monitors" || return 1
 	BUILTIN_OUTPUT="$(jq -r --arg pattern "$internal_pattern" '
 		[.[] | select(.name | test($pattern; "i"))]
-		| sort_by([if (.disabled // false) then 1 else 0 end, .name])
+		| sort_by([if (.disabled == false and .dpmsStatus == true) then 0 else 1 end, .name])
 		| .[0].name // empty
 	' <<< "$monitors")"
 	remembered_external="$(state_field external)"
-	if [[ -n "$remembered_external" ]] && jq -e --arg output "$remembered_external" \
+	if [[ -n "$remembered_external" ]] && output_is_active "$monitors" "$remembered_external"; then
+		EXTERNAL_OUTPUT="$remembered_external"
+	else
+		EXTERNAL_OUTPUT="$(jq -r --arg internal "$internal_pattern" --arg ignored "$ignored_output_pattern" '
+			[.[] | select(((.name | test($internal; "i")) | not)
+				and ((.name | test($ignored; "i")) | not) and .disabled == false and .dpmsStatus == true)]
+			| sort_by([if (.name | test("^HDMI"; "i")) then 0 else 1 end, .name])
+			| .[0].name // empty
+		' <<< "$monitors")"
+	fi
+	if [[ -z "$EXTERNAL_OUTPUT" && -n "$remembered_external" ]] && jq -e --arg output "$remembered_external" \
 		--arg internal "$internal_pattern" --arg ignored "$ignored_output_pattern" '
 			any(.[]; .name == $output
 				and ((.name | test($internal; "i")) | not)
 				and ((.name | test($ignored; "i")) | not))
 		' <<< "$monitors" >/dev/null; then
 		EXTERNAL_OUTPUT="$remembered_external"
-	else
+	elif [[ -z "$EXTERNAL_OUTPUT" ]]; then
 		EXTERNAL_OUTPUT="$(jq -r --arg internal "$internal_pattern" --arg ignored "$ignored_output_pattern" '
 			[.[] | select(((.name | test($internal; "i")) | not)
 				and ((.name | test($ignored; "i")) | not))]
@@ -95,33 +120,33 @@ output_exists() {
 
 output_is_active() {
 	[[ -n "$2" ]] && jq -e --arg output "$2" '
-		any(.[]; .name == $output and (.disabled // false) == false and (.dpmsStatus // true) == true)
+		any(.[]; .name == $output and .disabled == false and .dpmsStatus == true)
 	' <<< "$1" >/dev/null
 }
 
 active_output_count() {
 	jq -r --arg ignored "$ignored_output_pattern" '[.[] | select(
 		((.name | test($ignored; "i")) | not)
-		and (.disabled // false) == false and (.dpmsStatus // true) == true)] | length' <<< "$1"
+		and .disabled == false and .dpmsStatus == true)] | length' <<< "$1"
 }
 
 active_external_count() {
 	jq -r --arg internal "$internal_pattern" --arg ignored "$ignored_output_pattern" '[.[] | select(
 		((.name | test($internal; "i")) | not) and ((.name | test($ignored; "i")) | not)
-		and (.disabled // false) == false and (.dpmsStatus // true) == true)] | length' <<< "$1"
+		and .disabled == false and .dpmsStatus == true)] | length' <<< "$1"
 }
 
 output_is_mirroring() {
 	local monitors="$1" mirror_output="$2" source_output="$3"
 	[[ -n "$mirror_output" && -n "$source_output" ]] && jq -e --arg mirror "$mirror_output" --arg source "$source_output" '
 		([.[] | select(.name == $source)][0].id | tostring) as $sourceId |
-		any(.[]; .name == $mirror and (.disabled // false) == false and (.dpmsStatus // true) == true
+		any(.[]; .name == $mirror and .disabled == false and .dpmsStatus == true
 			and (((.mirrorOf // "") | tostring) == $source or ((.mirrorOf // "") | tostring) == $sourceId))
 	' <<< "$monitors" >/dev/null
 }
 
-drm_connector_is_disconnected() {
-	local output="$1" connector="" connector_state=""
+drm_connector_status() {
+	local output="$1" connector="" connector_state="" saw_unknown=false saw_disconnected=false
 	local -a connectors=()
 	[[ -n "$output" ]] || return 1
 	shopt -s nullglob
@@ -130,10 +155,17 @@ drm_connector_is_disconnected() {
 	for connector in "${connectors[@]}"; do
 		[[ -r "$connector" ]] || continue
 		read -r connector_state < "$connector" || continue
-		[[ "$connector_state" == disconnected ]] && return 0
-		[[ "$connector_state" == connected || "$connector_state" == unknown ]] && return 1
+		[[ "$connector_state" == connected ]] && { printf 'connected\n'; return 0; }
+		[[ "$connector_state" == unknown ]] && saw_unknown=true
+		[[ "$connector_state" == disconnected ]] && saw_disconnected=true
 	done
+	[[ "$saw_unknown" == true ]] && { printf 'unknown\n'; return 0; }
+	[[ "$saw_disconnected" == true ]] && { printf 'disconnected\n'; return 0; }
 	return 1
+}
+
+drm_connector_is_disconnected() {
+	[[ "$(drm_connector_status "$1" 2>/dev/null || true)" == disconnected ]]
 }
 
 refresh_wallpaper() {
@@ -142,10 +174,23 @@ refresh_wallpaper() {
 	[[ -r "$wallpaper_file" ]] || return 1
 	read -r wallpaper < "$wallpaper_file" || return 1
 	[[ -n "$wallpaper" && -f "$wallpaper" ]] || return 1
-	timeout 12 "$caelestia_bin" wallpaper -f "$wallpaper" >/dev/null 2>&1
+	run_bounded 12 "$caelestia_bin" wallpaper -f "$wallpaper" >/dev/null 2>&1
+}
+
+# Quickshell creates layer-shell surfaces from the screen list.  A Hyprland
+# monitor reload can finish before Caelestia has rebuilt those surfaces, which
+# leaves the shell on the old output while normal windows use the new one.
+# Refresh only after the layout has been verified; failure is deliberately
+# non-fatal because the display transaction is still authoritative.
+refresh_caelestia_screens() {
+	[[ "$refresh_caelestia" == true ]] || return 0
+	command -v "$systemctl_bin" >/dev/null 2>&1 || return 0
+	(
+		run_bounded 8 "$systemctl_bin" --user try-restart caelestia.service >/dev/null 2>&1 || true
+	) &
 }
 
 notify_recovery() {
 	command -v "$notify_bin" >/dev/null 2>&1 || return 0
-	timeout 3 "$notify_bin" -u critical -a Projector "Private display restored" "$1" >/dev/null 2>&1 || true
+	run_bounded 3 "$notify_bin" -u critical -a Projector "Private display restored" "$1" >/dev/null 2>&1 || true
 }

@@ -68,6 +68,7 @@
             bash ${./tests/controller.bash}
           PROJECTORCTL_PANEL_SOURCE=${./src/projector-panel.sh} \
             PROJECTORCTL_FAKE_QUICKSHELL=${./tests/fake-quickshell} \
+            PROJECTORCTL_QML_SOURCE=${./ui/Projector.qml} \
             bash ${./tests/panel.bash}
           qmllint \
             -I ${pkgs.qt6.qtdeclarative}/lib/qt-6/qml \

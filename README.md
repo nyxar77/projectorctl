@@ -56,20 +56,28 @@ install -d ~/.local/share/projectorctl/lib
 install -Dm644 src/lib/*.sh ~/.local/share/projectorctl/lib/
 install -Dm755 src/projector-panel.sh ~/.local/bin/projector-panel
 install -Dm644 ui/Projector.qml ~/.local/share/projectorctl/Projector.qml
+install -Dm644 modules/projector-layout.lua ~/.local/share/projectorctl/projector-layout.lua
 ```
 
-The controller finds its modules in `~/.local/share/projectorctl/lib`. To open the panel, point it at the QML file:
+The controller finds its modules in `~/.local/share/projectorctl/lib`. Load the display rules from your Hyprland Lua config; without this line, `hyprctl reload` cannot apply projectorctl's generated layouts:
+
+```lua
+dofile(os.getenv("HOME") .. "/.local/share/projectorctl/projector-layout.lua")
+```
+
+To open the panel, point it at the installed QML file:
 
 ```sh
-PROJECTORCTL_PANEL_QML=/path/to/projectorctl/ui/Projector.qml projector-panel
+PROJECTORCTL_PANEL_QML="$HOME/.local/share/projectorctl/Projector.qml" projector-panel
 ```
 
 For a permanent panel keybinding, use the same command in your Hyprland Lua config:
 
 ```lua
+local home = os.getenv("HOME")
 hl.bind(
   "SUPER + P",
-  hl.dsp.exec_cmd("env PROJECTORCTL_PANEL_QML=/path/to/projectorctl/ui/Projector.qml projector-panel")
+  hl.dsp.exec_cmd("env PROJECTORCTL_PANEL_QML=" .. home .. "/.local/share/projectorctl/Projector.qml projector-panel")
 )
 ```
 
@@ -86,6 +94,7 @@ ExecStart=%h/.local/bin/projectorctl watch
 ExecStopPost=-%h/.local/bin/projectorctl check
 Restart=always
 RestartSec=1
+TimeoutStopSec=10
 
 [Install]
 WantedBy=graphical-session.target
@@ -115,8 +124,14 @@ projectorctl recover
 
 Press `Ctrl+Alt+F12`. The Home Manager module installs this as a direct recovery binding, so it works without opening the panel.
 
-The guard starts in Private mode, listens to Hyprland and kernel DRM hotplug events, and returns to Private mode if a presentation output disappears. Presentation rules are session-only, so a reboot or new login cannot silently resume sharing. There is also a slow 60-second check as a fallback, but it stays out of Hyprland when no presentation layout is active.
+The guard starts in Private mode, listens to Hyprland and kernel DRM hotplug events, and returns to Private mode if a presentation output disappears. Presentation rules are session-only, so a reboot or new login cannot silently resume sharing. A 60-second topology check catches missed events and repairs any layout that no longer exactly matches the recorded mode.
 Event listeners block while idle. If either listener exits unexpectedly, the guard starts it again.
+
+If Present or Extend returns to Private mode, inspect
+`$XDG_RUNTIME_DIR/projector-control-$UID/last-verification.json`. It records
+the requested layout and the final monitor snapshot. The verifier waits up to
+eight seconds by default; set `PROJECTORCTL_VERIFICATION_TIMEOUT` only when a
+display consistently needs longer to complete a mode switch.
 
 ## Theme
 
