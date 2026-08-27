@@ -22,6 +22,7 @@
             pkgs.socat
             pkgs.systemd
             pkgs.util-linux
+            pkgs.wireplumber
           ];
           text = ''
             PROJECTORCTL_LIB_DIR=${./src/lib}
@@ -58,6 +59,7 @@
           shellcheck -s bash -e SC2034,SC2154 \
             ${./src/lib/config.sh} \
             ${./src/lib/runtime.sh} \
+            ${./src/lib/audio.sh} \
             ${./src/lib/state.sh} \
             ${./src/lib/hyprland.sh} \
             ${./src/lib/layouts.sh} \

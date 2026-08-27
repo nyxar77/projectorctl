@@ -13,6 +13,7 @@ export PROJECTORCTL_RUNTIME_DIR="$test_root/run"
 export PROJECTORCTL_LAYOUT_FILE="$test_root/layout.lua"
 export PROJECTORCTL_PRIVATE_LAYOUT_FILE="$test_root/private-layout.lua"
 export PROJECTORCTL_DRM_ROOT="$test_root/drm"
+export PROJECTORCTL_AUDIO_AUTO_SWITCH=false
 mkdir -p "$HOME"
 
 # shellcheck source=/dev/null

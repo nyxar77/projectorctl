@@ -123,8 +123,8 @@ qml_text="$(sed -n '1,999p' "$qml_source")"
 	printf 'audio controls do not probe and filter backend sinks\n' >&2
 	exit 1
 }
-[[ "$qml_text" == *'set-default'* && "$qml_text" == *'AudioOutputButton'* ]] || {
-	printf 'audio controls do not use the shared audio backend per monitor\n' >&2
+[[ "$qml_text" == *'"projectorctl", "audio"'* && "$qml_text" == *'AudioOutputButton'* ]] || {
+	printf 'audio controls do not use projectorctl audio selection per monitor\n' >&2
 	exit 1
 }
 [[ "$qml_text" == *'readonly property bool isDefault'* && "$qml_text" == *'root.active'* ]] || {
@@ -133,6 +133,22 @@ qml_text="$(sed -n '1,999p' "$qml_source")"
 }
 [[ "$qml_text" == *'cursorShape: Qt.PointingHandCursor'* ]] || {
 	printf 'interactive controls do not use a pointing-hand cursor\n' >&2
+	exit 1
+}
+[[ "$qml_text" == *'line.replace(/[│├└─]/g, " ")'* ]] || {
+	printf 'audio sink parsing does not handle wpctl tree prefixes\n' >&2
+	exit 1
+}
+[[ "$qml_text" == *'Qt.ForbiddenCursor'* && "$qml_text" == *'readonly property bool hasSinks'* ]] || {
+	printf 'audio controls do not expose a disabled cursor state\n' >&2
+	exit 1
+}
+[[ "$qml_text" != *'.replaceAll('* && "$qml_text" == *'.split("_").join(" ")'* ]] || {
+	printf 'audio labels use a QML-incompatible string replacement\n' >&2
+	exit 1
+}
+[[ "$qml_text" == *'audioProcess.exec(["projectorctl", "audio",'* && "$qml_text" != *'audioMenu.open()'* ]] || {
+	printf 'audio controls do not switch directly through projectorctl\n' >&2
 	exit 1
 }
 

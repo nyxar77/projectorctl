@@ -142,7 +142,7 @@ watch_guard() {
 
 	watch_events 8>&- & hypr_event_pid=$!
 	watch_drm_events 8>&- & drm_event_pid=$!
-	trap 'kill "${hypr_event_pid:-}" "${drm_event_pid:-}" 2>/dev/null || true' EXIT
+	trap 'kill "${hypr_event_pid:-}" "${drm_event_pid:-}" 2>/dev/null || true; wait "${hypr_event_pid:-}" "${drm_event_pid:-}" 2>/dev/null || true' EXIT
 	trap 'exit 0' INT TERM
 	if guard_check; then
 		next_poll=$((SECONDS + guard_poll_interval))

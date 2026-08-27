@@ -33,7 +33,7 @@ nix profile install github:nyxar77/projectorctl
 nix profile install github:nyxar77/projectorctl#panel
 ```
 
-The first command installs `projectorctl`, the CLI and guard. The second installs the Quickshell panel. `homeManagerModules.default` is the Home Manager module, and `checks.controller` is the test check.
+The first command installs the CLI; the second installs the Quickshell panel. The guard service is installed by the Home Manager module.
 
 This project uses Hyprland's Lua configuration. Bind the panel wherever it makes sense in your config:
 
@@ -46,7 +46,7 @@ It reads display status once when it opens, after an action, or when you press t
 
 ## Without Nix
 
-The CLI needs Bash, `jq`, `socat`, `timeout`, `flock`, and `udevadm`. Hyprland and a working `hyprctl` are assumed. `notify-send` and Caelestia are optional.
+The CLI needs Bash, `jq`, `socat`, `timeout`, `flock`, `udevadm`, and `wpctl` from WirePlumber. Hyprland and a working `hyprctl` are assumed. `notify-send` and Caelestia are optional.
 
 Install the scripts and controller modules somewhere on your `PATH`:
 
@@ -94,6 +94,7 @@ ExecStart=%h/.local/bin/projectorctl watch
 ExecStopPost=-%h/.local/bin/projectorctl check
 Restart=always
 RestartSec=1
+KillMode=control-group
 TimeoutStopSec=10
 
 [Install]
@@ -115,10 +116,12 @@ projectorctl apply builtin
 projectorctl apply duplicate
 projectorctl apply extend-left
 projectorctl apply extend-right
+projectorctl audio builtin
+projectorctl audio external
 projectorctl recover
 ```
 
-`builtin` is the fail-closed Private mode: the laptop stays active and all external or unknown outputs are disabled. `duplicate` explicitly presents the laptop desktop on one external output. `recover` returns to Private mode. Projector-only was removed because disabling the laptop forces Hyprland to relocate workspaces.
+`builtin` is the fail-closed Private mode: the laptop stays active and all external or unknown outputs are disabled. `duplicate` presents the laptop desktop on one external output. Display changes select the matching audio output when one is available; `audio builtin` and `audio external` select it directly. `recover` returns to Private mode. Projector-only was removed because disabling the laptop forces Hyprland to relocate workspaces.
 
 ## If the screen stays black
 

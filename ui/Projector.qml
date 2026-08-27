@@ -279,13 +279,14 @@ Scope {
 				break;
 			if (!inSinks)
 				continue;
-			const match = line.match(/(\*)?\s*(\d+)\.\s+(alsa_output\.\S+)/);
+			const normalized = line.replace(/[│├└─]/g, " ");
+			const match = normalized.match(/(\*)?\s*(\d+)\.\s+(alsa_output\.\S+)/);
 			if (!match || match[3].indexOf("alsa_output.") !== 0)
 				continue;
 			parsed.push({
 				id: Number(match[2]),
 				name: match[3],
-				label: match[3].replace(/^alsa_output\./, "").replaceAll("_", " "),
+				label: match[3].replace(/^alsa_output\./, "").split("_").join(" "),
 				defaultSink: Boolean(match[1])
 			});
 		}
@@ -301,15 +302,15 @@ Scope {
 			: !/HDMI|DP|DISPLAYPORT/i.test(sink.name));
 	}
 
-	function setAudioOutput(sink) {
-		if (!sink || audioBusy)
+	function selectAudioFor(output) {
+		if (!output || audioBusy)
 			return;
 		audioBusy = true;
 		audioSettingDefault = true;
 		audioCommandExitCode = 1;
 		audioOutputDone = false;
 		audioExitSeen = false;
-		audioProcess.exec(["wpctl", "set-default", String(sink.id)]);
+		audioProcess.exec(["projectorctl", "audio", output.internal === true ? "builtin" : "external"]);
 	}
 
 	function outputByName(name) {
@@ -754,51 +755,36 @@ Scope {
 		required property var outputData
 		readonly property var sinks: root.audioSinksFor(outputData)
 		readonly property bool isDefault: sinks.some(sink => sink.defaultSink === true)
+		readonly property bool hasSinks: sinks.length > 0
 
 		text: "♪"
 		Accessible.name: "Choose audio output for " + (outputData ? outputData.name : "monitor")
-		enabled: sinks.length > 0 && !root.audioBusy
+		enabled: hasSinks && !root.audioBusy
+		opacity: isDefault ? 1 : hasSinks ? 0.38 : 0.18
 		implicitWidth: 24
 		implicitHeight: 28
 		padding: 0
 		font.pixelSize: 16
 		contentItem: Text {
 			text: audioButton.text
-		color: audioButton.isDefault
-			? root.active
-			: audioButton.enabled ? root.projectorAccent : root.faded(root.line, 0.55)
+			color: audioButton.isDefault ? root.active : root.faded(root.dim, 0.55)
 			horizontalAlignment: Text.AlignHCenter
 			verticalAlignment: Text.AlignVCenter
 		}
 		background: Rectangle {
-			radius: 5
+			radius: 6
 			color: audioButton.isDefault
-				? root.faded(root.active, 0.16)
+				? root.faded(root.active, 0.42)
 				: audioButton.down
 				? root.faded(root.text, 0.12)
 				: audioButton.hovered && audioButton.enabled ? root.hover : "transparent"
 		}
 
 		HoverHandler {
-			enabled: audioButton.enabled
-			cursorShape: Qt.PointingHandCursor
+			cursorShape: audioButton.enabled ? Qt.PointingHandCursor : Qt.ForbiddenCursor
 		}
 
-		Menu {
-			id: audioMenu
-			Repeater {
-				model: audioButton.sinks
-				delegate: MenuItem {
-					text: modelData.label
-					checkable: true
-					checked: modelData.defaultSink === true
-					onTriggered: root.setAudioOutput(modelData)
-					HoverHandler { cursorShape: Qt.PointingHandCursor }
-				}
-			}
-		}
-
-		onClicked: audioMenu.open()
+		onClicked: root.selectAudioFor(outputData)
 	}
 
 	component DisplayPair: Rectangle {

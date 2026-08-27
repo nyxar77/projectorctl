@@ -3,7 +3,7 @@ let
   cfg = config.programs.projectorctl;
   controller = pkgs.writeShellApplication {
     name = "projectorctl";
-    runtimeInputs = [ pkgs.coreutils pkgs.jq pkgs.libnotify pkgs.socat pkgs.systemd pkgs.util-linux ];
+    runtimeInputs = [ pkgs.coreutils pkgs.jq pkgs.libnotify pkgs.socat pkgs.systemd pkgs.util-linux pkgs.wireplumber ];
     text = ''
       PROJECTORCTL_LIB_DIR=${../src/lib}
     '' + builtins.readFile ../src/projectorctl.sh;
@@ -46,6 +46,7 @@ in {
         ExecStopPost = "-${controller}/bin/projectorctl check";
         Restart = "always";
         RestartSec = 1;
+        KillMode = "control-group";
         TimeoutStopSec = 10;
       };
       Install.WantedBy = [ "graphical-session.target" ];

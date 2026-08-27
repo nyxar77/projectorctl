@@ -11,6 +11,7 @@ projectorctl_lib_dir="${PROJECTORCTL_LIB_DIR:-$projectorctl_default_lib_dir}"
 for projectorctl_module in \
 	config.sh \
 	runtime.sh \
+	audio.sh \
 	state.sh \
 	hyprland.sh \
 	layouts.sh \
@@ -22,7 +23,7 @@ done
 unset projectorctl_module
 
 usage() {
-	printf 'usage: projectorctl status | apply MODE | recover | check | watch\n' >&2
+	printf 'usage: projectorctl status | apply MODE | audio builtin|external | recover | check | watch\n' >&2
 }
 
 main() {
@@ -38,6 +39,10 @@ main() {
 				return 2
 			}
 			apply_mode "$2"
+			;;
+		audio)
+			[[ $# -eq 2 && ( "$2" == builtin || "$2" == external ) ]] || { usage; return 2; }
+			switch_audio_for_mode "$2"
 			;;
 		recover)
 			manual_recover
