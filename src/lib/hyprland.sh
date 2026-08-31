@@ -141,13 +141,56 @@ layout_matches() {
 	esac
 }
 
+layout_configuration_matches() {
+	local monitors="$1" mode="$2" topology="" direction=""
+	local builtin="$3" external="${4:-}" builtin_x=0 external_x=0
+	topology="$(mode_topology "$mode")"
+	direction="$(mode_direction "$mode")"
+	output_is_configured "$monitors" "$builtin" || return 1
+	case "$topology" in
+		builtin)
+			(( $(configured_output_count "$monitors") == 1 )) && \
+				(( $(configured_external_count "$monitors") == 0 ))
+			;;
+		mirror)
+			output_is_configured_mirroring "$monitors" "$external" "$builtin" && \
+				(( $(configured_output_count "$monitors") == 2 )) && \
+				(( $(configured_external_count "$monitors") == 1 ))
+			;;
+		extend)
+			output_is_configured "$monitors" "$external" || return 1
+			(( $(configured_output_count "$monitors") == 2 )) || return 1
+			(( $(configured_external_count "$monitors") == 1 )) || return 1
+			output_is_configured_mirroring "$monitors" "$external" "$builtin" && return 1
+			builtin_x="$(jq -r --arg output "$builtin" '[.[] | select(.name == $output)][0].x' <<< "$monitors")" || return 1
+			external_x="$(jq -r --arg output "$external" '[.[] | select(.name == $output)][0].x' <<< "$monitors")" || return 1
+			[[ "$direction" == right && "$external_x" -gt "$builtin_x" ]] || \
+				[[ "$direction" == left && "$external_x" -lt "$builtin_x" ]]
+			;;
+		*) return 1 ;;
+	esac
+}
+
+epoch_microseconds() {
+	local value="${1:-$EPOCHREALTIME}"
+	value="${value//[.,]/}"
+	[[ "$value" =~ ^[0-9]+$ ]] || return 1
+	printf '%s\n' "$value"
+}
+
 wait_for_layout() {
 	local mode="$1" builtin="$2" external="${3:-}" current="" deadline=0 now=0
-	now="${EPOCHREALTIME/./}"
+	now="$(epoch_microseconds)" || {
+		LAST_ERROR="Could not read the monotonic layout-verification clock"
+		return 1
+	}
 	deadline=$((10#$now + verification_timeout * 1000000))
 	LAST_MONITOR_SNAPSHOT=""
 	while true; do
-		now="${EPOCHREALTIME/./}"
+		now="$(epoch_microseconds)" || {
+			LAST_ERROR="Could not read the monotonic layout-verification clock"
+			return 1
+		}
 		((10#$now < deadline)) || break
 		if current="$(monitor_json "$monitor_probe_timeout")"; then
 			LAST_MONITOR_SNAPSHOT="$current"

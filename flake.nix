@@ -20,7 +20,6 @@
             pkgs.jq
             pkgs.libnotify
             pkgs.socat
-            pkgs.systemd
             pkgs.util-linux
             pkgs.wireplumber
           ];

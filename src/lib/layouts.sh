@@ -68,7 +68,6 @@ apply_layout_mode() {
 	wake_output "$current" "$BUILTIN_OUTPUT" || return 1
 	wait_for_layout "$mode" "$BUILTIN_OUTPUT" "$EXTERNAL_OUTPUT" || return 1
 	switch_audio_for_mode "$mode" || true
-	refresh_caelestia_screens
 	[[ -n "$event" ]] || event="$(mode_event "$mode")" || return 1
 	write_state "$mode" "$BUILTIN_OUTPUT" "$EXTERNAL_OUTPUT" "$event" "$level"
 }

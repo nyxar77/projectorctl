@@ -11,8 +11,6 @@ guard_event_fifo="$runtime_root/guard.events"
 
 hyprctl_bin="${PROJECTORCTL_HYPRCTL:-hyprctl}"
 caelestia_bin="${PROJECTORCTL_CAELESTIA:-caelestia}"
-systemctl_bin="${PROJECTORCTL_SYSTEMCTL:-systemctl}"
-refresh_caelestia="${PROJECTORCTL_REFRESH_CAELESTIA:-true}"
 notify_bin="${PROJECTORCTL_NOTIFY_SEND:-notify-send}"
 udevadm_bin="${PROJECTORCTL_UDEVADM:-udevadm}"
 wpctl_bin="${PROJECTORCTL_WPCTL:-wpctl}"
@@ -135,8 +133,6 @@ valid_positive_number "$verification_retry_interval" || verification_retry_inter
 valid_positive_integer "$guard_retry_interval" || guard_retry_interval=1
 valid_positive_number "$watcher_health_interval" || watcher_health_interval=5
 valid_positive_duration "$command_kill_after" || command_kill_after=1
-[[ "$refresh_caelestia" == true || "$refresh_caelestia" == false ]] || refresh_caelestia=true
-
 run_bounded() {
 	local deadline="$1"
 	shift

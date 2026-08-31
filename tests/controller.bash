@@ -53,6 +53,7 @@ monitors_builtin='[
 monitors_duplicate="$(jq -c '.[0:2]' <<< "$monitors_three")"
 monitors_extend_right="$(jq -c '.[0:2] | .[1].mirrorOf = -1' <<< "$monitors_three")"
 monitors_extend_left="$(jq -c '.[0:2] | .[0].x = 1920 | .[1].x = 0 | .[1].mirrorOf = -1' <<< "$monitors_three")"
+monitors_duplicate_sleeping="$(jq -c 'map(.dpmsStatus = false)' <<< "$monitors_duplicate")"
 monitors_legacy_external="$(jq -c '.[0:2] | .[0].dpmsStatus = false | .[1].mirrorOf = -1' <<< "$monitors_three")"
 monitors_external_only="$(jq -c '.[0:2]
 	| .[0].disabled = true | .[0].dpmsStatus = false
@@ -111,9 +112,6 @@ TEST_MONITORS="$monitors_three"
 monitor_json() { printf '%s\n' "$TEST_MONITORS"; }
 BUILTIN_OUTPUT=eDP-1
 EXTERNAL_OUTPUT=HDMI-A-1
-caelestia_refresh_count=0
-refresh_caelestia_screens() { ((++caelestia_refresh_count)); }
-
 apply_builtin_only "$monitors_three" || fail "Private layout failed in harness"
 layout="$(<"$layout_log")"
 assert_contains "$layout" 'output = "", disabled = true' "Private mode denies unknown outputs"
@@ -135,8 +133,6 @@ apply_extended "$monitors_three" right || fail "Extend layout failed in harness"
 layout="$(<"$layout_log")"
 assert_contains "$layout" 'output = "HDMI-A-1", mode = "preferred", position = "auto-right"' "Extend delegates placement to Hyprland"
 assert_contains "$layout" 'output = "DP-2", disabled = true' "Extend disables unrelated outputs"
-(( caelestia_refresh_count >= 3 )) || fail "verified layout transitions refresh Caelestia screens"
-pass "verified layout transitions refresh Caelestia screens"
 
 if apply_mode_locked external > "$test_root/external.json"; then
 	fail "projector-only remained available"
@@ -153,6 +149,7 @@ assert_not_contains "$controller_text" 'moveworkspacetomonitor' "controller has 
 assert_not_contains "$controller_text" 'workspace.move' "controller has no Lua workspace relocation"
 assert_contains "$controller_text" 'hl.dsp.dpms' "controller can wake a legacy projector-only laptop panel"
 assert_not_contains "$controller_text" 'lua_quote disable' "controller never hides the laptop with DPMS"
+assert_not_contains "$controller_text" 'try-restart caelestia.service' "controller never restarts the lock-screen owner"
 
 TEST_MONITORS="$(jq -c '.[0:2]' <<< "$monitors_three")"
 monitor_json() { printf '%s\n' "$TEST_MONITORS"; }
@@ -220,6 +217,9 @@ if layout_matches "$extra_internal" duplicate eDP-1 HDMI-A-1; then
 	fail "mirror topology with an extra active output was accepted"
 fi
 pass "layout validation rejects extra active outputs"
+layout_configuration_matches "$monitors_duplicate_sleeping" duplicate eDP-1 HDMI-A-1 || \
+	fail "sleeping presentation topology was rejected"
+pass "configured topology ignores normal DPMS sleep"
 
 TEST_MONITORS='[
 	{"id":0,"name":"eDP-1","disabled":false,"dpmsStatus":true,"width":1920,"height":1080,"x":0,"y":0,"mirrorOf":-1},
@@ -229,6 +229,15 @@ write_state builtin eDP-1 HDMI-A-1 "Private" info
 status="$(status_json)"
 assert_eq builtin "$(jq -r .mode <<< "$status")" "reports the fail-closed Private layout"
 assert_contains "$(jq -r .message <<< "$status")" "external outputs are disabled" "status explains the privacy boundary"
+
+rm -f "$state_file"
+status="$(status_json "$monitors_builtin")" || fail "untracked Private startup layout was rejected"
+assert_eq idle "$(jq -r .health <<< "$status")" "untracked Private startup is safe and idle"
+assert_contains "$(jq -r .message <<< "$status")" "guard is disarmed" "startup status explains the guard boundary"
+if status="$(status_json "$monitors_duplicate")"; then
+	fail "untracked presentation layout was reported as safe"
+fi
+assert_eq unknown "$(jq -r .mode <<< "$status")" "untracked presentation requires explicit recovery"
 
 probe_log="$test_root/probes.log"
 # Restore the real verifier after the layout-construction harness above.
@@ -243,6 +252,8 @@ source "$controller_lib_dir/hyprland.sh"
 )
 [[ "$(wc -l < "$probe_log")" -ge 3 ]] || fail "layout verification did not retry until its deadline"
 assert_eq 0.2 "$(sed -n '1p' "$probe_log")" "layout verification uses short bounded probes"
+assert_eq 1787875461067882 "$(epoch_microseconds '1787875461,067882')" \
+	"layout verification accepts comma-decimal clocks"
 
 delayed_snapshot="$test_root/delayed-snapshot.json"
 delayed_attempts="$test_root/delayed-attempts"
@@ -370,6 +381,19 @@ recovery_log="$test_root/recovery.log"
 )
 assert_contains "$(<"$recovery_log")" "Private mode was restored" "unplugging a presentation restores Private mode"
 
+sleeping_recovery_log="$test_root/sleeping-recovery.log"
+(
+	trap - EXIT
+	write_state duplicate eDP-1 HDMI-A-1 "Presenting" info
+	# shellcheck disable=SC2329
+	monitor_json() { printf '%s\n' "$monitors_duplicate_sleeping"; }
+	# shellcheck disable=SC2329
+	recover_private() { printf '%s\n' "$1" > "$sleeping_recovery_log"; }
+	recover_if_needed_locked
+)
+[[ ! -e "$sleeping_recovery_log" ]] || fail "DPMS sleep triggered presentation recovery"
+pass "guard leaves a sleeping lock-screen topology untouched"
+
 legacy_recovery_log="$test_root/legacy-recovery.log"
 (
 	trap - EXIT
@@ -400,7 +424,7 @@ corrupt_recovery_log="$test_root/corrupt-recovery.log"
 	recover_private() { printf '%s\n' "$1" > "$corrupt_recovery_log"; }
 	recover_if_needed_locked
 )
-assert_contains "$(<"$corrupt_recovery_log")" "state was missing or incompatible" "corrupt state fails closed"
+assert_contains "$(<"$corrupt_recovery_log")" "state was incompatible" "corrupt state fails closed"
 
 interrupted_log="$test_root/interrupted.log"
 (
@@ -419,12 +443,19 @@ idle_log="$test_root/idle.log"
 	write_state builtin eDP-1 HDMI-A-1 "Private" info
 	# shellcheck disable=SC2329
 	monitor_json() { printf called > "$idle_log"; return 1; }
-	if recover_if_needed_locked; then
-		exit 1
-	fi
+	recover_if_needed_locked
 )
-[[ -e "$idle_log" ]] || fail "Private guard did not validate the topology"
-pass "the guard fails closed when Private topology cannot be validated"
+[[ ! -e "$idle_log" ]] || fail "Private mode unexpectedly queried or repaired the topology"
+pass "the guard stays disarmed in Private mode"
+
+missing_startup_stays_idle() {
+	local state_file="$test_root/missing-state.json" layout_file="$test_root/missing-layout.lua"
+	rm -f "$state_file" "$layout_file"
+	recover_if_needed_locked
+	[[ ! -e "$state_file" && ! -e "$layout_file" ]]
+}
+missing_startup_stays_idle || fail "a new session triggered display recovery"
+pass "missing startup runtime state does not reload the graphical session"
 
 rm -f "$pending_guard_file"
 (

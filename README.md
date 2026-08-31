@@ -91,8 +91,7 @@ PartOf=graphical-session.target
 
 [Service]
 ExecStart=%h/.local/bin/projectorctl watch
-ExecStopPost=-%h/.local/bin/projectorctl check
-Restart=always
+Restart=on-failure
 RestartSec=1
 KillMode=control-group
 TimeoutStopSec=10
@@ -127,7 +126,7 @@ projectorctl recover
 
 Press `Ctrl+Alt+F12`. The Home Manager module installs this as a direct recovery binding, so it works without opening the panel.
 
-The guard starts in Private mode, listens to Hyprland and kernel DRM hotplug events, and returns to Private mode if a presentation output disappears. Presentation rules are session-only, so a reboot or new login cannot silently resume sharing. A 60-second topology check catches missed events and repairs any layout that no longer exactly matches the recorded mode.
+The guard stays disarmed in Private mode, listens to Hyprland and kernel DRM hotplug events while Present or Extend is active, and returns to Private mode if the selected presentation output disappears. Presentation rules are session-only, so a reboot or new login cannot silently resume sharing. A 60-second configured-topology check catches missed events without treating normal DPMS sleep as display failure.
 Event listeners block while idle. If either listener exits unexpectedly, the guard starts it again.
 
 If Present or Extend returns to Private mode, inspect

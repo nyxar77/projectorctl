@@ -1,3 +1,10 @@
+guard_mode_is_armed() {
+	case "$1" in
+		duplicate|extend-right|extend-left) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
 queue_guard_check() {
 	local removed_output="${1:-*}" existing="" temporary="$pending_guard_file.tmp.${BASHPID}"
 	if [[ -r "$pending_guard_file" ]] && read -r existing < "$pending_guard_file"; then
@@ -30,7 +37,12 @@ recover_if_needed_locked() {
 	local removed_output="${1:-}" state="" requested="" phase="" guarded="" remembered_builtin="" monitors=""
 	state="$(read_state)"
 	if ! state_is_current "$state"; then
-		recover_with_notice "Display state was missing or incompatible; Private mode was restored"
+		# A new graphical session has no runtime state or session overlay. The
+		# persistent Private rules already own that case, so the guard stays
+		# disarmed instead of reloading Hyprland during startup.
+		if [[ -e "$state_file" || -e "$layout_file" ]]; then
+			recover_with_notice "Display state was incompatible; Private mode was restored"
+		fi
 		return
 	fi
 	requested="$(jq -r '.requestedMode' <<< "$state")"
@@ -46,6 +58,7 @@ recover_if_needed_locked() {
 		recover_with_notice "Legacy projector-only state was reset to Private mode"
 		return
 	fi
+	guard_mode_is_armed "$requested" || return 0
 	if [[ -n "$removed_output" && "$removed_output" == "$guarded" ]] || drm_connector_is_disconnected "$guarded"; then
 		recover_with_notice "Projector disconnected; Private mode was restored"
 		return
@@ -55,12 +68,8 @@ recover_if_needed_locked() {
 	if output_exists "$monitors" "$remembered_builtin"; then
 		BUILTIN_OUTPUT="$remembered_builtin"
 	fi
-	if ! layout_matches "$monitors" "$requested" "$BUILTIN_OUTPUT" "$guarded"; then
-		if [[ "$requested" == builtin ]]; then
-			recover_with_notice "Display topology changed unexpectedly; Private mode was restored"
-		else
-			recover_with_notice "A presentation output failed or changed; Private mode was restored"
-		fi
+	if ! layout_configuration_matches "$monitors" "$requested" "$BUILTIN_OUTPUT" "$guarded"; then
+		recover_with_notice "A presentation output failed or changed; Private mode was restored"
 	fi
 }
 

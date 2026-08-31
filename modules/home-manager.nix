@@ -3,7 +3,7 @@ let
   cfg = config.programs.projectorctl;
   controller = pkgs.writeShellApplication {
     name = "projectorctl";
-    runtimeInputs = [ pkgs.coreutils pkgs.jq pkgs.libnotify pkgs.socat pkgs.systemd pkgs.util-linux pkgs.wireplumber ];
+    runtimeInputs = [ pkgs.coreutils pkgs.jq pkgs.libnotify pkgs.socat pkgs.util-linux pkgs.wireplumber ];
     text = ''
       PROJECTORCTL_LIB_DIR=${../src/lib}
     '' + builtins.readFile ../src/projectorctl.sh;
@@ -43,8 +43,7 @@ in {
       };
       Service = {
         ExecStart = "${controller}/bin/projectorctl watch";
-        ExecStopPost = "-${controller}/bin/projectorctl check";
-        Restart = "always";
+        Restart = "on-failure";
         RestartSec = 1;
         KillMode = "control-group";
         TimeoutStopSec = 10;

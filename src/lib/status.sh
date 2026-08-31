@@ -69,8 +69,14 @@ status_json() {
 			health=error
 			message="Display state is unsafe; restore Private mode"
 		elif [[ "$state_current" != true ]]; then
-			health=warning
-			message="Display state was missing or incompatible; Private recovery is required"
+			if [[ "$observed_mode" == builtin ]]; then
+				health=idle
+				message="Private mode; presentation guard is disarmed"
+			else
+				mode=unknown
+				health=error
+				message="Untracked display layout; restore Private mode"
+			fi
 		elif [[ -n "$event" && "$requested" == "$mode" && "$event_level" == warning ]]; then
 			health=warning
 			message="$event"

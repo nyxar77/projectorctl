@@ -124,6 +124,12 @@ output_is_active() {
 	' <<< "$1" >/dev/null
 }
 
+output_is_configured() {
+	[[ -n "$2" ]] && jq -e --arg output "$2" '
+		any(.[]; .name == $output and .disabled == false)
+	' <<< "$1" >/dev/null
+}
+
 active_output_count() {
 	jq -r --arg ignored "$ignored_output_pattern" '[.[] | select(
 		((.name | test($ignored; "i")) | not)
@@ -136,11 +142,31 @@ active_external_count() {
 		and .disabled == false and .dpmsStatus == true)] | length' <<< "$1"
 }
 
+configured_output_count() {
+	jq -r --arg ignored "$ignored_output_pattern" '[.[] | select(
+		((.name | test($ignored; "i")) | not) and .disabled == false)] | length' <<< "$1"
+}
+
+configured_external_count() {
+	jq -r --arg internal "$internal_pattern" --arg ignored "$ignored_output_pattern" '[.[] | select(
+		((.name | test($internal; "i")) | not) and ((.name | test($ignored; "i")) | not)
+		and .disabled == false)] | length' <<< "$1"
+}
+
 output_is_mirroring() {
 	local monitors="$1" mirror_output="$2" source_output="$3"
 	[[ -n "$mirror_output" && -n "$source_output" ]] && jq -e --arg mirror "$mirror_output" --arg source "$source_output" '
 		([.[] | select(.name == $source)][0].id | tostring) as $sourceId |
 		any(.[]; .name == $mirror and .disabled == false and .dpmsStatus == true
+			and (((.mirrorOf // "") | tostring) == $source or ((.mirrorOf // "") | tostring) == $sourceId))
+	' <<< "$monitors" >/dev/null
+}
+
+output_is_configured_mirroring() {
+	local monitors="$1" mirror_output="$2" source_output="$3"
+	[[ -n "$mirror_output" && -n "$source_output" ]] && jq -e --arg mirror "$mirror_output" --arg source "$source_output" '
+		([.[] | select(.name == $source)][0].id | tostring) as $sourceId |
+		any(.[]; .name == $mirror and .disabled == false
 			and (((.mirrorOf // "") | tostring) == $source or ((.mirrorOf // "") | tostring) == $sourceId))
 	' <<< "$monitors" >/dev/null
 }
@@ -175,19 +201,6 @@ refresh_wallpaper() {
 	read -r wallpaper < "$wallpaper_file" || return 1
 	[[ -n "$wallpaper" && -f "$wallpaper" ]] || return 1
 	run_bounded 12 "$caelestia_bin" wallpaper -f "$wallpaper" >/dev/null 2>&1
-}
-
-# Quickshell creates layer-shell surfaces from the screen list.  A Hyprland
-# monitor reload can finish before Caelestia has rebuilt those surfaces, which
-# leaves the shell on the old output while normal windows use the new one.
-# Refresh only after the layout has been verified; failure is deliberately
-# non-fatal because the display transaction is still authoritative.
-refresh_caelestia_screens() {
-	[[ "$refresh_caelestia" == true ]] || return 0
-	command -v "$systemctl_bin" >/dev/null 2>&1 || return 0
-	(
-		run_bounded 8 "$systemctl_bin" --user try-restart caelestia.service >/dev/null 2>&1 || true
-	) &
 }
 
 notify_recovery() {
