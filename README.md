@@ -1,54 +1,93 @@
 # projectorctl
 
-A small display switcher for Hyprland laptops. It handles private laptop-only, explicit presentation, and extended layouts without an `xrandr` script or a streamed virtual display.
+`projectorctl` is a display switcher for Hyprland laptops. It provides safe,
+explicit modes for keeping an external display private, mirroring a
+presentation, or extending the desktop.
 
 ![projectorctl panel](preview/preview0.png)
 
-The panel is just a chooser. The actual work is done by the CLI, so it is still usable from scripts and keybindings.
+You can use it through the Quickshell panel, from the command line, or from a
+Hyprland keybinding.
 
-## Nix and Home Manager
+## Requirements
 
-Add the flake and import the module:
+- Hyprland with Lua configuration support
+- A laptop display reported as `eDP`, `LVDS`, or `DSI`
+- An external display connected through HDMI, DisplayPort, or USB-C
+- WirePlumber for automatic audio-output switching
+- Quickshell if you want to use the panel
+
+## Install with Home Manager
+
+This is the recommended installation. Add the flake to your inputs:
 
 ```nix
 inputs.projectorctl.url = "github:nyxar77/projectorctl";
+```
 
+Then import and enable it in your Home Manager configuration:
+
+```nix
 imports = [ inputs.projectorctl.homeManagerModules.default ];
 
 programs.projectorctl.enable = true;
 ```
 
-The module exposes three options:
+The module installs the CLI and panel, loads projectorctl's display rules into
+Hyprland, adds the `Ctrl+Alt+F12` recovery keybinding, and starts the display
+guard.
+
+The panel and guard can be disabled independently:
 
 ```nix
-programs.projectorctl.enable = true;
-programs.projectorctl.enablePanel = true; # Quickshell chooser, on by default
-programs.projectorctl.enableGuard = true; # unplug recovery, on by default
+programs.projectorctl = {
+  enable = true;
+  enablePanel = true; # Quickshell panel
+  enableGuard = true; # Recover if the selected external display disappears
+};
 ```
 
-The flake also exposes packages directly:
+Apply your Home Manager configuration, then continue to [Usage](#usage).
+
+## Install with Nix only
+
+Install the CLI:
 
 ```sh
 nix profile install github:nyxar77/projectorctl
+```
+
+To use the panel, install it as well:
+
+```sh
 nix profile install github:nyxar77/projectorctl#panel
 ```
 
-The first command installs the CLI; the second installs the Quickshell panel. The guard service is installed by the Home Manager module.
-
-This project uses Hyprland's Lua configuration. Bind the panel wherever it makes sense in your config:
+Without the Home Manager module, you must also load the display rules in your
+Hyprland Lua configuration:
 
 ```lua
-hl.bind("SUPER + P", hl.dsp.exec_cmd("projector-panel"))
+dofile(os.getenv("HOME") .. "/.local/share/projectorctl/projector-layout.lua")
 ```
 
-The panel opens on every active screen and does not belong to a workspace. Run the same command again to close it.
-It reads display status once when it opens, after an action, or when you press the refresh button; it does not continuously poll Hyprland while it is open.
+From a cloned checkout of this repository, copy the loader into that location
+first:
 
-## Without Nix
+```sh
+install -Dm644 modules/projector-layout.lua ~/.local/share/projectorctl/projector-layout.lua
+```
 
-The CLI needs Bash, `jq`, `socat`, `timeout`, `flock`, `udevadm`, and `wpctl` from WirePlumber. Hyprland and a working `hyprctl` are assumed. `notify-send` and Caelestia are optional.
+If you want automatic unplug recovery, follow the guard-service instructions
+under [Manual installation](#manual-installation).
 
-Install the scripts and controller modules somewhere on your `PATH`:
+## Manual installation
+
+The CLI requires Bash, `jq`, `socat`, `timeout`, `flock`, `udevadm`, and
+`wpctl`. Hyprland and a working `hyprctl` are also required. The panel requires
+Quickshell. `notify-send` and Caelestia are optional.
+
+From a cloned copy of this repository, install the files under your home
+directory:
 
 ```sh
 install -Dm755 src/projectorctl.sh ~/.local/bin/projectorctl
@@ -59,29 +98,21 @@ install -Dm644 ui/Projector.qml ~/.local/share/projectorctl/Projector.qml
 install -Dm644 modules/projector-layout.lua ~/.local/share/projectorctl/projector-layout.lua
 ```
 
-The controller finds its modules in `~/.local/share/projectorctl/lib`. Load the display rules from your Hyprland Lua config; without this line, `hyprctl reload` cannot apply projectorctl's generated layouts:
+Make sure `~/.local/bin` is on your `PATH`, then load the display rules from
+your Hyprland Lua configuration:
 
 ```lua
 dofile(os.getenv("HOME") .. "/.local/share/projectorctl/projector-layout.lua")
 ```
 
-To open the panel, point it at the installed QML file:
+To run the panel, point it at the installed QML file:
 
 ```sh
 PROJECTORCTL_PANEL_QML="$HOME/.local/share/projectorctl/Projector.qml" projector-panel
 ```
 
-For a permanent panel keybinding, use the same command in your Hyprland Lua config:
-
-```lua
-local home = os.getenv("HOME")
-hl.bind(
-  "SUPER + P",
-  hl.dsp.exec_cmd("env PROJECTORCTL_PANEL_QML=" .. home .. "/.local/share/projectorctl/Projector.qml projector-panel")
-)
-```
-
-To keep unplug recovery running, save this as `~/.config/systemd/user/projector-display-guard.service`:
+For automatic recovery when an external display is unplugged, create
+`~/.config/systemd/user/projector-display-guard.service`:
 
 ```ini
 [Unit]
@@ -100,54 +131,106 @@ TimeoutStopSec=10
 WantedBy=graphical-session.target
 ```
 
-Then enable it:
+Enable the service:
 
 ```sh
 systemctl --user daemon-reload
 systemctl --user enable --now projector-display-guard.service
 ```
 
-## CLI
+## Usage
+
+### Panel
+
+Run the following command to open the panel:
+
+```sh
+projector-panel
+```
+
+Run it again to close it. The panel opens on every active screen and offers
+four display modes:
+
+- **Private** keeps only the laptop display active.
+- **Present** mirrors the laptop display to the external display.
+- **Extend right** places the external display to the right.
+- **Extend left** places the external display to the left.
+
+With the Home Manager installation, you can bind the panel in your Hyprland
+Lua configuration:
+
+```lua
+hl.bind("SUPER + P", hl.dsp.exec_cmd("projector-panel"))
+```
+
+For a manual installation, include the QML path in the binding:
+
+```lua
+local home = os.getenv("HOME")
+hl.bind(
+  "SUPER + P",
+  hl.dsp.exec_cmd("env PROJECTORCTL_PANEL_QML=" .. home .. "/.local/share/projectorctl/Projector.qml projector-panel")
+)
+```
+
+The panel also lets you choose an audio output associated with either display.
+
+### Command line
+
+Check the current display state:
 
 ```sh
 projectorctl status
+```
+
+Change the display layout:
+
+```sh
 projectorctl apply builtin
 projectorctl apply duplicate
-projectorctl apply extend-left
 projectorctl apply extend-right
+projectorctl apply extend-left
+```
+
+Select an audio output directly:
+
+```sh
 projectorctl audio builtin
 projectorctl audio external
+```
+
+Return to the safe laptop-only layout:
+
+```sh
 projectorctl recover
 ```
 
-`builtin` is the fail-closed Private mode: the laptop stays active and all external or unknown outputs are disabled. `duplicate` presents the laptop desktop on one external output. Display changes select the matching audio output when one is available; `audio builtin` and `audio external` select it directly. `recover` returns to Private mode. Projector-only was removed because disabling the laptop forces Hyprland to relocate workspaces.
+Layout changes automatically select the matching audio output when one is
+available. Projector-only mode is intentionally unsupported because disabling
+the laptop display makes Hyprland relocate workspaces.
 
-## If the screen stays black
+## Recovery
 
-Press `Ctrl+Alt+F12`. The Home Manager module installs this as a direct recovery binding, so it works without opening the panel.
-
-The guard stays disarmed in Private mode, listens to Hyprland and kernel DRM hotplug events while Present or Extend is active, and returns to Private mode if the selected presentation output disappears. Presentation rules are session-only, so a reboot or new login cannot silently resume sharing. A 60-second configured-topology check catches missed events without treating normal DPMS sleep as display failure.
-Event listeners block while idle. If either listener exits unexpectedly, the guard starts it again.
-
-If Present or Extend returns to Private mode, inspect
-`$XDG_RUNTIME_DIR/projector-control-$UID/last-verification.json`. It records
-the requested layout and the final monitor snapshot. The verifier waits up to
-eight seconds by default; set `PROJECTORCTL_VERIFICATION_TIMEOUT` only when a
-display consistently needs longer to complete a mode switch.
-
-## Theme
-
-The panel uses the current Caelestia scheme when one is available. Otherwise it uses its own small fallback palette.
-
-## Check the repo
+If a display change leaves the screens black, press `Ctrl+Alt+F12`. The Home
+Manager module and the manually installed layout loader both add this direct
+recovery binding, so it works without opening the panel. You can also run:
 
 ```sh
-nix flake check
+projectorctl recover
 ```
 
-Without Nix, run the test scripts directly:
+The guard is active only while Present or Extend mode is selected. If the
+external display disappears, it restores Private mode. Presentation layouts
+are kept only for the current login session, so they do not silently return
+after a reboot or new login.
+
+If a switch to Present or Extend fails, inspect the last verification snapshot:
 
 ```sh
-bash tests/controller.bash
-bash tests/panel.bash
+jq . "$XDG_RUNTIME_DIR/projector-control-$UID/last-verification.json"
 ```
+
+## Appearance
+
+The panel uses the current Caelestia color scheme when one is available and a
+built-in fallback palette otherwise.
